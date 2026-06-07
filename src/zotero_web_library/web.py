@@ -1,0 +1,280 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from flask import Flask, jsonify, render_template, request, send_file
+
+from . import app_store
+from .semantic_tags import normalize_hash_tag, stable_tag_color
+from .sources import SourceError, create_local_copy, create_read_only_source, delete_source
+from .sync import mark_conflicts_for_changed_keys, prepare_sync_payloads
+from .zotero_adapter import ZoteroRepository
+
+
+def create_app() -> Flask:
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app_store.ensure_app_store()
+
+    def library_or_404(library_id: str) -> dict[str, Any]:
+        library = app_store.get_library(library_id)
+        if not library:
+            raise SourceError("文库不存在。")
+        return library
+
+    @app.get("/")
+    def index():
+        libraries = app_store.list_libraries()
+        default_source = str(Path.home() / "Zotero")
+        return render_template("index.html", libraries=libraries, default_source=default_source)
+
+    @app.get("/library/<library_id>")
+    def library_page(library_id: str):
+        library = library_or_404(library_id)
+        libraries = app_store.list_libraries()
+        return render_template("library.html", library=library, libraries=libraries)
+
+    @app.post("/api/sources/read-only")
+    def api_read_only_source():
+        payload = request.get_json(silent=True) or request.form
+        try:
+            record = create_read_only_source(str(payload.get("path") or ""), name=str(payload.get("name") or "").strip() or None)
+            return jsonify({"ok": True, "library": record})
+        except (SourceError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/sources/local-copy")
+    def api_local_copy_source():
+        payload = request.get_json(silent=True) or request.form
+        try:
+            record = create_local_copy(str(payload.get("path") or ""), name=str(payload.get("name") or "").strip() or None)
+            return jsonify({"ok": True, "library": record})
+        except (SourceError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/sources/<library_id>")
+    def api_delete_source(library_id: str):
+        try:
+            library = library_or_404(library_id)
+            if library.get("mode") == "local_copy" and app_store.unsynced_count(library_id) and not request.args.get("confirm"):
+                return jsonify({"ok": False, "requires_confirmation": True, "error": "本地副本有未同步更改，确认后才会删除。"}), 409
+            deleted = delete_source(library_id)
+            return jsonify({"ok": True, "library": deleted})
+        except (SourceError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/state")
+    def api_library_state(library_id: str):
+        try:
+            repo = ZoteroRepository(library_or_404(library_id))
+            state = repo.state()
+            return jsonify({"ok": True, **state})
+        except (SourceError, OSError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/preferences/columns")
+    def api_columns(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        columns = payload.get("columns")
+        if not isinstance(columns, list):
+            return jsonify({"ok": False, "error": "columns must be a list"}), 400
+        app_store.set_preference(library_id, "columns", [str(item) for item in columns if str(item)])
+        return jsonify({"ok": True, "columns": app_store.column_preference(library_id)})
+
+    @app.post("/api/library/<library_id>/preferences/column-widths")
+    def api_column_widths(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        widths = payload.get("widths")
+        if not isinstance(widths, dict):
+            return jsonify({"ok": False, "error": "widths must be an object"}), 400
+        app_store.set_preference(library_id, "column_widths", widths)
+        return jsonify({"ok": True, "widths": app_store.column_width_preference(library_id)})
+
+    @app.post("/api/library/<library_id>/preferences/plain-tags")
+    def api_plain_tags_preference(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        collapsed = bool(payload.get("collapsed"))
+        app_store.set_preference(library_id, "plain_tags_collapsed", collapsed)
+        return jsonify({"ok": True, "collapsed": collapsed})
+
+    @app.post("/api/library/<library_id>/collections")
+    def api_create_collection(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        name = str(payload.get("name") or "").strip()
+        parent_key = str(payload.get("parent_key") or "").strip() or None
+        if not name:
+            return jsonify({"ok": False, "error": "文件夹名称不能为空。"}), 400
+        try:
+            collection = ZoteroRepository(library_or_404(library_id)).create_collection(name, parent_key)
+            return jsonify({"ok": True, "collection": collection})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/collections/<collection_key>")
+    def api_rename_collection(library_id: str, collection_key: str):
+        payload = request.get_json(silent=True) or {}
+        name = str(payload.get("name") or "").strip()
+        try:
+            repo = ZoteroRepository(library_or_404(library_id))
+            if name:
+                repo.rename_collection(collection_key, name)
+            if "parent_key" in payload:
+                parent_key = str(payload.get("parent_key") or "").strip() or None
+                repo.reparent_collection(collection_key, parent_key)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/items/<item_key>/field")
+    def api_update_item_field(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        field = str(payload.get("field") or "").strip()
+        value = str(payload.get("value") or "")
+        if not field:
+            return jsonify({"ok": False, "error": "字段名不能为空。"}), 400
+        try:
+            ZoteroRepository(library_or_404(library_id)).update_item_field(item_key, field, value)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/<item_key>/tags")
+    def api_add_tag(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        tag = str(payload.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"ok": False, "error": "标签不能为空。"}), 400
+        try:
+            ZoteroRepository(library_or_404(library_id)).add_tag(item_key, tag)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/library/<library_id>/items/<item_key>/tags")
+    def api_remove_tag(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        tag = str(payload.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"ok": False, "error": "标签不能为空。"}), 400
+        try:
+            ZoteroRepository(library_or_404(library_id)).remove_tag(item_key, tag)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/items/<item_key>/rating")
+    def api_set_rating(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            value = int(payload.get("rating") or 0)
+            ZoteroRepository(library_or_404(library_id)).set_rating(item_key, value)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/items/<item_key>/reading-status")
+    def api_set_reading_status(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        status = str(payload.get("status") or "").strip()
+        try:
+            ZoteroRepository(library_or_404(library_id)).set_reading_status(item_key, status)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/<item_key>/collections")
+    def api_item_collection(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        collection_key = str(payload.get("collection_key") or "").strip()
+        enabled = bool(payload.get("enabled"))
+        if not collection_key:
+            return jsonify({"ok": False, "error": "collection_key is required"}), 400
+        try:
+            ZoteroRepository(library_or_404(library_id)).set_collection_membership(item_key, collection_key, enabled)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/semantic-rules")
+    def api_semantic_rules(library_id: str):
+        library_or_404(library_id)
+        return jsonify({"ok": True, "rules": app_store.list_semantic_rules(library_id)})
+
+    @app.post("/api/library/<library_id>/semantic-rules")
+    def api_add_semantic_rule(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        bucket = str(payload.get("bucket") or "").strip()
+        pattern = str(payload.get("pattern") or "").strip()
+        label = str(payload.get("label") or "").strip()
+        if bucket not in {"rating", "nested", "venue_rank", "reading_status", "plain"}:
+            return jsonify({"ok": False, "error": "未知语义桶。"}), 400
+        if not pattern:
+            return jsonify({"ok": False, "error": "pattern 不能为空。"}), 400
+        rule = app_store.add_semantic_rule(library_id, bucket, pattern, label)
+        return jsonify({"ok": True, "rule": rule})
+
+    @app.get("/api/library/<library_id>/tag-shortcuts")
+    def api_tag_shortcuts(library_id: str):
+        library_or_404(library_id)
+        return jsonify({"ok": True, "shortcuts": app_store.list_tag_shortcuts(library_id)})
+
+    @app.post("/api/library/<library_id>/tag-shortcuts")
+    def api_add_tag_shortcut(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        tag = str(payload.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"ok": False, "error": "标签不能为空。"}), 400
+        normalized_tag = normalize_hash_tag(tag)
+        shortcut = app_store.upsert_tag_shortcut(library_id, normalized_tag, stable_tag_color(normalized_tag))
+        return jsonify({"ok": True, "shortcut": shortcut})
+
+    @app.delete("/api/library/<library_id>/tag-shortcuts")
+    def api_delete_tag_shortcut(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        tag = str(payload.get("tag") or "").strip()
+        if not tag:
+            return jsonify({"ok": False, "error": "标签不能为空。"}), 400
+        app_store.delete_tag_shortcut(library_id, tag)
+        return jsonify({"ok": True})
+
+    @app.get("/api/library/<library_id>/sync/payloads")
+    def api_sync_payloads(library_id: str):
+        library_or_404(library_id)
+        return jsonify({"ok": True, "payloads": prepare_sync_payloads(library_id)})
+
+    @app.post("/api/library/<library_id>/sync/conflicts")
+    def api_mark_conflicts(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        keys = {str(key) for key in payload.get("changed_keys") or []}
+        return jsonify({"ok": True, "conflicted": mark_conflicts_for_changed_keys(library_id, keys)})
+
+    @app.get("/api/library/<library_id>/attachments/<attachment_key>")
+    def api_open_attachment(library_id: str, attachment_key: str):
+        repo = ZoteroRepository(library_or_404(library_id))
+        for item in repo.items():
+            for attachment in item.get("attachments", []):
+                if attachment.get("key") == attachment_key and attachment.get("openable") and attachment.get("resolved_path"):
+                    path = Path(attachment["resolved_path"])
+                    if path.exists():
+                        return send_file(path, as_attachment=False)
+        return jsonify({"ok": False, "error": "附件文件缺失或不可直接打开。"}), 404
+
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    app.run(host="127.0.0.1", port=5088, debug=True, use_reloader=False)
+
+
+if __name__ == "__main__":
+    main()

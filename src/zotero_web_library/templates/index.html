@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zotero Web Library</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="landing-page">
+  <main class="source-shell">
+    <section class="source-hero">
+      <div>
+        <p class="eyebrow">Standalone Zotero Web Library</p>
+        <h1>Zotero 网页文库</h1>
+        <p>只读取原始 Zotero 源库；需要编辑时先创建本地副本。不会直接写你的源 <code>zotero.sqlite</code>。</p>
+      </div>
+    </section>
+
+    <section class="source-grid">
+      <form class="source-card" data-source-form data-mode="read-only">
+        <h2>连接只读模式</h2>
+        <p>直接读取 Zotero 本地目录，禁用任何会修改源库的操作。</p>
+        <input name="path" value="{{ default_source }}" placeholder="C:\Users\27216\Zotero">
+        <input name="name" placeholder="可选名称，例如 我的 Zotero">
+        <button type="submit">只读连接</button>
+      </form>
+      <form class="source-card" data-source-form data-mode="local-copy">
+        <h2>本地副本模式</h2>
+        <p>复制 <code>zotero.sqlite</code> 和 <code>storage/</code>，然后只编辑副本。</p>
+        <input name="path" value="{{ default_source }}" placeholder="C:\Users\27216\Zotero">
+        <input name="name" placeholder="可选名称，例如 Zotero 副本">
+        <button type="submit">创建本地副本</button>
+      </form>
+    </section>
+
+    <section class="library-list">
+      <h2>已配置文库</h2>
+      {% if libraries %}
+      {% for library in libraries %}
+      <div class="library-list-item">
+        <a class="library-list-link" href="{{ url_for('library_page', library_id=library.library_id) }}">
+          <strong>{{ library.name }}</strong>
+          <span>{{ "只读连接" if library.mode == "read_only_connection" else "本地副本" }} · 来源：{{ library.source_path }}</span>
+          {% if library.mode == "local_copy" %}
+          <span>副本：{{ library.data_path }}</span>
+          {% endif %}
+        </a>
+        <button
+          type="button"
+          class="danger-btn"
+          data-delete-source="{{ library.library_id }}"
+          data-confirm="{{ '确认删除这个本地副本？原始 Zotero 目录不会被修改。' if library.mode == 'local_copy' else '确认断开这个只读连接？原始 Zotero 目录不会被修改。' }}"
+        >{{ "删除副本" if library.mode == "local_copy" else "断开" }}</button>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="empty-state">还没有文库，先选择 Zotero 数据目录。</div>
+      {% endif %}
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.playwright-cli/
+app-data/
+*.pyc
+*.egg-info/
+server-*.log
+.env
+.DS_Store

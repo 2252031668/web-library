@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ library.name }} - Zotero Web Library</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body data-library-page data-library-id="{{ library.library_id }}">
+  <aside class="rail">
+    <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
+    <button class="rail-btn active" title="文库">库</button>
+    <button class="rail-btn" title="标签" data-manage-shortcuts>签</button>
+    <button class="rail-btn" title="设置" data-open-columns>设</button>
+  </aside>
+  <main class="workspace">
+    <header class="topbar">
+      <div>
+        <h1>{{ library.name }}</h1>
+        <p>{{ "只读连接" if library.mode == "read_only_connection" else "本地副本可编辑" }} · {{ library.source_path }}</p>
+      </div>
+      <div class="topbar-actions">
+        <span class="mode-pill {{ 'readonly' if library.mode == 'read_only_connection' else 'copy' }}">{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}</span>
+        <span class="mode-pill" data-unsynced>未同步 0</span>
+        <a class="ghost-btn" href="{{ url_for('index') }}">源管理</a>
+      </div>
+    </header>
+
+    <section class="library-layout">
+      <aside class="left-pane">
+        <div class="pane-head">
+          <div>
+            <h2>我的文库</h2>
+            <p>集合树与标签筛选</p>
+          </div>
+        </div>
+        <form class="create-collection" data-create-collection-form hidden>
+          <input name="name" placeholder="新建文件夹">
+          <select name="parent_key" data-parent-select>
+            <option value="">根目录</option>
+          </select>
+          <button type="submit">新建</button>
+        </form>
+        <nav class="tree-list" data-tree></nav>
+        <section class="tag-filter-section">
+          <h3>评分</h3>
+          <div data-semantic-filter="rating"></div>
+          <h3># 标签</h3>
+          <div data-semantic-filter="nested"></div>
+          <h3>期刊/会议等级</h3>
+          <div data-semantic-filter="venue_rank"></div>
+          <h3>阅读状态</h3>
+          <div data-semantic-filter="reading_status"></div>
+          <button class="plain-toggle" type="button" data-toggle-plain-tags>▶ 普通标签</button>
+          <div data-plain-tags-body hidden>
+            <input class="tag-search" data-tag-search placeholder="筛选普通标签">
+            <div data-semantic-filter="plain"></div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="table-pane">
+        <div class="table-toolbar">
+          <div>
+            <h2>条目表</h2>
+            <p><span data-visible-count>0</span> / <span data-total-count>0</span> 条</p>
+          </div>
+          <div class="toolbar-actions">
+            <input type="search" data-table-search placeholder="搜索标题、作者、标签">
+            <button class="ghost-btn" type="button" data-open-columns>字段列</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="item-table">
+            <thead data-table-head></thead>
+            <tbody data-table-body></tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="right-pane">
+        <div class="pane-head">
+          <div>
+            <h2>条目详情</h2>
+            <p data-detail-type>未选择</p>
+          </div>
+        </div>
+        <div data-detail class="detail-empty">从中间表格选择一篇文献。</div>
+      </aside>
+    </section>
+  </main>
+
+  <div class="floating-panel" data-column-panel hidden>
+    <section class="floating-card">
+      <div class="pane-head">
+        <div>
+          <h2>字段列</h2>
+          <p>选择可见字段并调整顺序</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-columns>×</button>
+      </div>
+      <div data-column-list></div>
+      <button type="button" data-save-columns>保存字段设置</button>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

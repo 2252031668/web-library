@@ -1,0 +1,21 @@
+[project]
+name = "zotero-web-library"
+version = "0.1.0"
+description = "Standalone Zotero-compatible web library viewer and local-copy editor."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flask>=3.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
