@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 from . import app_store
 from .semantic_tags import first_value, normalize_hash_tag, parse_tags, rating_tag, stable_tag_color
+from .structured_text import extract_structured_fields, source_field_for_block, upsert_block
 from .sources import ensure_editable, sqlite_path_for, storage_path_for
 from .utils import new_key, now_iso
 
@@ -29,16 +31,26 @@ class ZoteroRepository:
         self.storage_path = storage_path_for(library)
 
     def read_conn(self) -> sqlite3.Connection:
-        return connect_zotero(self.db_path, read_only=True)
+        return closing(connect_zotero(self.db_path, read_only=True))
 
     def write_conn(self) -> sqlite3.Connection:
         ensure_editable(self.library)
-        return connect_zotero(self.db_path, read_only=False)
+        return closing(connect_zotero(self.db_path, read_only=False))
 
     def schema_tables(self) -> set[str]:
         with self.read_conn() as conn:
             rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             return {row["name"] for row in rows}
+
+    def _ensure_tag(self, conn: sqlite3.Connection, tag: str) -> int:
+        tag_row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (tag,)).fetchone()
+        if tag_row:
+            return int(tag_row["tagID"])
+        conn.execute("INSERT INTO tags (name) VALUES (?)", (tag,))
+        return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+    def _attach_tag_to_item(self, conn: sqlite3.Connection, item_id: int, tag_id: int) -> None:
+        conn.execute("INSERT OR IGNORE INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)", (item_id, tag_id))
 
     def collections(self) -> list[dict[str, Any]]:
         with self.read_conn() as conn:
@@ -74,6 +86,33 @@ class ZoteroRepository:
         for row in rows:
             fields[int(row["itemID"])][row["fieldName"]] = row["value"] or ""
         return fields
+
+    def _field_value(self, conn: sqlite3.Connection, item_id: int, field_id: int) -> str:
+        row = conn.execute(
+            """
+            SELECT v.value FROM itemData d
+            JOIN itemDataValues v ON v.valueID = d.valueID
+            WHERE d.itemID = ? AND d.fieldID = ?
+            """,
+            (item_id, field_id),
+        ).fetchone()
+        return row["value"] if row else ""
+
+    def _field_id(self, conn: sqlite3.Connection, field_name: str) -> int:
+        field = conn.execute("SELECT fieldID FROM fields WHERE fieldName = ?", (field_name,)).fetchone()
+        if not field:
+            raise ValueError(f"Zotero 原生字段不存在：{field_name}")
+        return int(field["fieldID"])
+
+    def _set_field_value(self, conn: sqlite3.Connection, item_id: int, field_id: int, value: str) -> None:
+        value_row = conn.execute("SELECT valueID FROM itemDataValues WHERE value = ?", (value,)).fetchone()
+        if value_row:
+            value_id = value_row["valueID"]
+        else:
+            conn.execute("INSERT INTO itemDataValues (value) VALUES (?)", (value,))
+            value_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.execute("DELETE FROM itemData WHERE itemID = ? AND fieldID = ?", (item_id, field_id))
+        conn.execute("INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)", (item_id, field_id, value_id))
 
     def _creators_by_item(self, conn: sqlite3.Connection) -> dict[int, list[dict[str, str]]]:
         if "creators" not in self.schema_tables():
@@ -223,6 +262,28 @@ class ZoteroRepository:
             counts[("Note", False)] += len(notes)
         return [{"label": label, "count": count, "missing": missing} for (label, missing), count in counts.items()]
 
+    def nested_tags(self, items: list[dict[str, Any]] | None = None) -> list[str]:
+        values = items if items is not None else self.items()
+        tags: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            for tag in item.get("semantic", {}).get("nested", []):
+                normalized = normalize_hash_tag(tag)
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                tags.append(normalized)
+        return tags
+
+    def ensure_tag_shortcuts_seeded(self, items: list[dict[str, Any]] | None = None, *, force: bool = False) -> list[dict[str, Any]]:
+        existing = app_store.list_tag_shortcuts(self.library["library_id"])
+        initialized = app_store.tag_shortcuts_initialized(self.library["library_id"])
+        if initialized and not force:
+            return existing
+        app_store.ensure_tag_shortcuts(self.library["library_id"], self.nested_tags(items))
+        app_store.mark_tag_shortcuts_initialized(self.library["library_id"])
+        return app_store.list_tag_shortcuts(self.library["library_id"])
+
     def items(self) -> list[dict[str, Any]]:
         with self.read_conn() as conn:
             fields = self._fields_by_item(conn)
@@ -255,6 +316,7 @@ class ZoteroRepository:
             item_notes = notes.get(item_id, [])
             venue = item_fields.get("publicationTitle") or item_fields.get("proceedingsTitle") or item_fields.get("conferenceName") or item_fields.get("repository") or ""
             year = (item_fields.get("date") or "")[:4]
+            structured = extract_structured_fields(item_fields.get("extra", ""), item_fields.get("abstractNote", ""))
             values.append(
                 {
                     "item_id": item_id,
@@ -262,6 +324,7 @@ class ZoteroRepository:
                     "type": row["typeName"],
                     "title": item_fields.get("title", "未命名文献"),
                     "fields": item_fields,
+                    "structured": structured,
                     "creators": creator_values,
                     "creator_names": creator_names,
                     "creators_display": creator_names[0] if creator_names else "",
@@ -286,6 +349,7 @@ class ZoteroRepository:
     def state(self) -> dict[str, Any]:
         items = self.items()
         collections = self.collections()
+        tag_shortcuts = self.ensure_tag_shortcuts_seeded(items)
         tag_counts = Counter(tag for item in items for tag in item["tags"])
         semantic_counts: dict[str, Counter[str]] = defaultdict(Counter)
         for item in items:
@@ -307,7 +371,7 @@ class ZoteroRepository:
             "items": items,
             "tag_counts": dict(tag_counts),
             "semantic_counts": {key: dict(counter) for key, counter in semantic_counts.items()},
-            "tag_shortcuts": app_store.list_tag_shortcuts(self.library["library_id"]),
+            "tag_shortcuts": tag_shortcuts,
         }
 
     def create_collection(self, name: str, parent_key: str | None = None) -> dict[str, Any]:
@@ -366,29 +430,9 @@ class ZoteroRepository:
             item = conn.execute("SELECT itemID FROM items WHERE key = ?", (item_key,)).fetchone()
             if not item:
                 raise ValueError("条目不存在。")
-            field = conn.execute("SELECT fieldID FROM fields WHERE fieldName = ?", (field_name,)).fetchone()
-            if not field:
-                conn.execute("INSERT INTO fields (fieldName) VALUES (?)", (field_name,))
-                field_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            else:
-                field_id = field["fieldID"]
-            old_row = conn.execute(
-                """
-                SELECT v.value FROM itemData d
-                JOIN itemDataValues v ON v.valueID = d.valueID
-                WHERE d.itemID = ? AND d.fieldID = ?
-                """,
-                (item["itemID"], field_id),
-            ).fetchone()
-            old_value = old_row["value"] if old_row else ""
-            value_row = conn.execute("SELECT valueID FROM itemDataValues WHERE value = ?", (value,)).fetchone()
-            if value_row:
-                value_id = value_row["valueID"]
-            else:
-                conn.execute("INSERT INTO itemDataValues (value) VALUES (?)", (value,))
-                value_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            conn.execute("DELETE FROM itemData WHERE itemID = ? AND fieldID = ?", (item["itemID"], field_id))
-            conn.execute("INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)", (item["itemID"], field_id, value_id))
+            field_id = self._field_id(conn, field_name)
+            old_value = self._field_value(conn, int(item["itemID"]), field_id)
+            self._set_field_value(conn, int(item["itemID"]), field_id, value)
             conn.execute("UPDATE items SET dateModified = ?, synced = 0 WHERE itemID = ?", (now_iso(), item["itemID"]))
             conn.commit()
         app_store.append_journal(
@@ -397,6 +441,27 @@ class ZoteroRepository:
             "item",
             item_key,
             {"field": field_name, "old": old_value, "new": value},
+        )
+
+    def update_structured_field(self, item_key: str, block_key: str, value: str) -> None:
+        ensure_editable(self.library)
+        field_name = source_field_for_block(block_key)
+        with self.write_conn() as conn:
+            item = conn.execute("SELECT itemID FROM items WHERE key = ?", (item_key,)).fetchone()
+            if not item:
+                raise ValueError("条目不存在。")
+            field_id = self._field_id(conn, field_name)
+            old_raw = self._field_value(conn, int(item["itemID"]), field_id)
+            new_raw = upsert_block(old_raw, block_key, value)
+            self._set_field_value(conn, int(item["itemID"]), field_id, new_raw)
+            conn.execute("UPDATE items SET dateModified = ?, synced = 0 WHERE itemID = ?", (now_iso(), item["itemID"]))
+            conn.commit()
+        app_store.append_journal(
+            self.library["library_id"],
+            "update_structured_field",
+            "item",
+            item_key,
+            {"block": block_key, "field": field_name, "new": value},
         )
 
     def add_tag(self, item_key: str, tag: str) -> None:
@@ -408,13 +473,8 @@ class ZoteroRepository:
             item = conn.execute("SELECT itemID FROM items WHERE key = ?", (item_key,)).fetchone()
             if not item:
                 raise ValueError("条目不存在。")
-            tag_row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (tag,)).fetchone()
-            if tag_row:
-                tag_id = tag_row["tagID"]
-            else:
-                conn.execute("INSERT INTO tags (name, type) VALUES (?, 0)", (tag,))
-                tag_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            conn.execute("INSERT OR IGNORE INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)", (item["itemID"], tag_id))
+            tag_id = self._ensure_tag(conn, tag)
+            self._attach_tag_to_item(conn, int(item["itemID"]), tag_id)
             conn.execute("UPDATE items SET synced = 0 WHERE itemID = ?", (item["itemID"],))
             conn.commit()
         app_store.append_journal(self.library["library_id"], "add_tag", "item", item_key, {"tag": tag})
@@ -457,13 +517,8 @@ class ZoteroRepository:
                 if parse_tags([row["name"]]).reading_status:
                     conn.execute("DELETE FROM itemTags WHERE itemID = ? AND tagID = ?", (item["itemID"], row["tagID"]))
             if target_tag:
-                tag_row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (target_tag,)).fetchone()
-                if tag_row:
-                    tag_id = tag_row["tagID"]
-                else:
-                    conn.execute("INSERT INTO tags (name, type) VALUES (?, 0)", (target_tag,))
-                    tag_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-                conn.execute("INSERT OR IGNORE INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)", (item["itemID"], tag_id))
+                tag_id = self._ensure_tag(conn, target_tag)
+                self._attach_tag_to_item(conn, int(item["itemID"]), tag_id)
             conn.execute("UPDATE items SET synced = 0 WHERE itemID = ?", (item["itemID"],))
             conn.commit()
         app_store.append_journal(
@@ -496,13 +551,8 @@ class ZoteroRepository:
                 if parse_tags([row["name"]]).rating:
                     conn.execute("DELETE FROM itemTags WHERE itemID = ? AND tagID = ?", (item["itemID"], row["tagID"]))
             if new_tag:
-                tag_row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (new_tag,)).fetchone()
-                if tag_row:
-                    tag_id = tag_row["tagID"]
-                else:
-                    conn.execute("INSERT INTO tags (name, type) VALUES (?, 0)", (new_tag,))
-                    tag_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-                conn.execute("INSERT OR IGNORE INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)", (item["itemID"], tag_id))
+                tag_id = self._ensure_tag(conn, new_tag)
+                self._attach_tag_to_item(conn, int(item["itemID"]), tag_id)
             conn.execute("UPDATE items SET synced = 0 WHERE itemID = ?", (item["itemID"],))
             conn.commit()
         app_store.append_journal(self.library["library_id"], "set_rating", "item", item_key, {"old": old_tags, "new": new_tag})

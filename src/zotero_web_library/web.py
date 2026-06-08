@@ -141,6 +141,19 @@ def create_app() -> Flask:
         except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.patch("/api/library/<library_id>/items/<item_key>/structured-field")
+    def api_update_structured_field(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        field = str(payload.get("field") or "").strip()
+        value = str(payload.get("value") or "")
+        if field not in {"remark", "title_zh", "abstract_zh"}:
+            return jsonify({"ok": False, "error": "未知结构化字段。"}), 400
+        try:
+            ZoteroRepository(library_or_404(library_id)).update_structured_field(item_key, field, value)
+            return jsonify({"ok": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/items/<item_key>/tags")
     def api_add_tag(library_id: str, item_key: str):
         payload = request.get_json(silent=True) or {}

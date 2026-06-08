@@ -51,6 +51,13 @@ def find_existing_source(path: str | Path, mode: str) -> dict[str, Any] | None:
     return None
 
 
+def _seed_shortcuts_for_library(record: dict[str, Any]) -> dict[str, Any]:
+    from .zotero_adapter import ZoteroRepository
+
+    ZoteroRepository(record).ensure_tag_shortcuts_seeded(force=True)
+    return record
+
+
 def create_read_only_source(path: str | Path, *, name: str | None = None) -> dict[str, Any]:
     info = validate_zotero_dir(path)
     existing = find_existing_source(info["root"], READ_ONLY)
@@ -70,7 +77,7 @@ def create_read_only_source(path: str | Path, *, name: str | None = None) -> dic
             "source_fingerprint": info["fingerprint"],
         }
     )
-    return record
+    return _seed_shortcuts_for_library(record)
 
 
 def create_local_copy(path: str | Path, *, name: str | None = None) -> dict[str, Any]:
@@ -103,7 +110,7 @@ def create_local_copy(path: str | Path, *, name: str | None = None) -> dict[str,
             "source_fingerprint": info["fingerprint"],
         }
     )
-    return record
+    return _seed_shortcuts_for_library(record)
 
 
 def delete_source(library_id: str) -> dict[str, Any]:

@@ -125,7 +125,7 @@ def rating_number(tags: list[str] | tuple[str, ...]) -> int:
 
 def rating_tag(value: int) -> str:
     rating = max(0, min(5, int(value)))
-    return "★" * rating if rating else ""
+    return "⭐" * rating if rating else ""
 
 
 def _custom_bucket(tag: str, rules: list[dict[str, str]]) -> str:

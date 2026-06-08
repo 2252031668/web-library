@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import app_db_path, app_data_dir, libraries_dir
-from .semantic_tags import normalize_hash_tag
+from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .utils import now_iso
 
 
@@ -77,6 +77,9 @@ DEFAULT_COLUMNS = [
 
 SUPPORTED_COLUMNS = {
     "title",
+    "remark",
+    "title_zh",
+    "abstract_zh",
     "creators",
     "year",
     "venue",
@@ -87,6 +90,8 @@ SUPPORTED_COLUMNS = {
     "plain",
     "collections",
 }
+
+TAG_SHORTCUTS_INITIALIZED_KEY = "tag_shortcuts_initialized"
 
 
 def ensure_app_store() -> None:
@@ -301,6 +306,25 @@ def list_tag_shortcuts(library_id: str) -> list[dict[str, Any]]:
         item["tag"] = normalized
         values.append(item)
     return values
+
+
+def ensure_tag_shortcuts(library_id: str, tags: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    for tag in tags:
+        normalized = normalize_hash_tag(tag)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        upsert_tag_shortcut(library_id, normalized, stable_tag_color(normalized))
+    return list_tag_shortcuts(library_id)
+
+
+def tag_shortcuts_initialized(library_id: str) -> bool:
+    return bool(get_preference(library_id, TAG_SHORTCUTS_INITIALIZED_KEY, False))
+
+
+def mark_tag_shortcuts_initialized(library_id: str) -> None:
+    set_preference(library_id, TAG_SHORTCUTS_INITIALIZED_KEY, True)
 
 
 def upsert_tag_shortcut(library_id: str, tag: str, color: str) -> dict[str, Any]:

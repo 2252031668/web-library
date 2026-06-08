@@ -10,14 +10,13 @@
   <aside class="rail">
     <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
     <button class="rail-btn active" title="文库">库</button>
-    <button class="rail-btn" title="标签" data-manage-shortcuts>签</button>
     <button class="rail-btn" title="设置" data-open-columns>设</button>
   </aside>
   <main class="workspace">
     <header class="topbar">
-      <div>
+      <div class="topbar-meta">
         <h1>{{ library.name }}</h1>
-        <p>{{ "只读连接" if library.mode == "read_only_connection" else "本地副本可编辑" }} · {{ library.source_path }}</p>
+        <p>{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}：{{ library.name }}</p>
       </div>
       <div class="topbar-actions">
         <span class="mode-pill {{ 'readonly' if library.mode == 'read_only_connection' else 'copy' }}">{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}</span>
@@ -61,13 +60,27 @@
 
       <section class="table-pane">
         <div class="table-toolbar">
-          <div>
-            <h2>条目表</h2>
-            <p><span data-visible-count>0</span> / <span data-total-count>0</span> 条</p>
+          <div class="table-toolbar-main">
+            <div class="table-toolbar-meta">
+              <h2>条目表</h2>
+              <p class="table-stats"><span data-selected-count>0</span> 已选 · <span data-visible-count>0</span> / <span data-total-count>0</span> 条</p>
+            </div>
+            <div class="toolbar-actions">
+              <input type="search" data-table-search placeholder="搜索标题、作者、标签">
+              <button class="ghost-btn" type="button" data-open-columns>字段列</button>
+            </div>
           </div>
-          <div class="toolbar-actions">
-            <input type="search" data-table-search placeholder="搜索标题、作者、标签">
-            <button class="ghost-btn" type="button" data-open-columns>字段列</button>
+          <div class="table-bulkbar">
+            <div class="bulk-actions" data-bulk-actions>
+              <button class="bulk-action-btn" type="button" data-bulk-action="add-item">添加条目</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="delete-items">删除</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="add-attachment">添加附件</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="download-papers">文献下载</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="query-rank">期刊&会议等级查询</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="export-citation">引用导出</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="paper-matrix">文献矩阵</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="knowledge-qa">知识库问答</button>
+            </div>
           </div>
         </div>
         <div class="table-wrap">

@@ -1,5 +1,8 @@
 const ALL_COLUMNS = [
   ["title", "标题"],
+  ["remark", "备注"],
+  ["title_zh", "中文标题"],
+  ["abstract_zh", "中文摘要"],
   ["creators", "作者"],
   ["year", "年份"],
   ["venue", "来源"],
@@ -14,6 +17,8 @@ const ALL_COLUMNS = [
 const DEFAULT_COLUMNS = ["title", "creators", "year", "venue", "rating", "nested", "venue_rank", "reading_status", "collections"];
 const READ_TAGS = new Set(["/done", "done", "已读", "read"]);
 const READING_TAGS = new Set(["/reading", "reading", "在读"]);
+const RATING_STAR = "⭐";
+const RATING_CONTROL_STAR = "⭐";
 
 const state = {
   libraryId: "",
@@ -23,6 +28,7 @@ const state = {
   tagShortcuts: [],
   filteredItems: [],
   selectedItem: null,
+  selectedItemKeys: new Set(),
   selectedCollectionKey: "",
   selectedTags: new Map(),
   columns: [],
@@ -31,6 +37,11 @@ const state = {
   search: "",
   plainCollapsed: true,
   activePopoverItemKey: "",
+  editingStructuredCell: null,
+  structuredCellDraft: "",
+  detailStructuredEditing: false,
+  detailStructuredDraft: { remark: "", title_zh: "", abstract_zh: "" },
+  expandedNotes: new Set(),
 };
 
 function postJSON(url, payload, method = "POST") {
@@ -76,6 +87,17 @@ function textOf(values) {
   return (values || []).join(" / ");
 }
 
+function ratingNumberFromValues(values) {
+  const current = textOf(values || []);
+  const stars = [...current].filter((char) => ["★", "⭐", "🌟"].includes(char)).length;
+  return stars || Number(current.replace(/\D/g, "")) || 0;
+}
+
+function ratingLabelFromValues(values) {
+  const count = ratingNumberFromValues(values);
+  return count ? RATING_STAR.repeat(count) : "";
+}
+
 function readingStatus(item) {
   const values = (item.semantic?.reading_status || []).map((value) => String(value).toLowerCase());
   if (values.some((value) => READ_TAGS.has(value))) return { key: "read", label: "已读", tag: "/done" };
@@ -83,13 +105,67 @@ function readingStatus(item) {
   return { key: "unread", label: "未读", tag: "" };
 }
 
+function isItemChecked(itemKey) {
+  return state.selectedItemKeys.has(String(itemKey || ""));
+}
+
+function toggleItemChecked(itemKey, checked) {
+  const key = String(itemKey || "");
+  if (!key) return;
+  if (checked) state.selectedItemKeys.add(key);
+  else state.selectedItemKeys.delete(key);
+}
+
+function filteredItemKeys() {
+  return state.filteredItems.map((item) => String(item.key || "")).filter(Boolean);
+}
+
+function filteredSelectedCount() {
+  return filteredItemKeys().filter((key) => state.selectedItemKeys.has(key)).length;
+}
+
+function totalSelectedCount() {
+  return state.selectedItemKeys.size;
+}
+
+function isAllFilteredSelected() {
+  const keys = filteredItemKeys();
+  return keys.length > 0 && keys.every((key) => state.selectedItemKeys.has(key));
+}
+
+function selectAllFilteredItems() {
+  filteredItemKeys().forEach((key) => state.selectedItemKeys.add(key));
+}
+
+function clearFilteredSelection() {
+  filteredItemKeys().forEach((key) => state.selectedItemKeys.delete(key));
+}
+
+function notifyFeatureInProgress(action) {
+  const labels = new Map([
+    ["add-item", "添加条目"],
+    ["delete-items", "删除"],
+    ["add-attachment", "添加附件"],
+    ["download-papers", "文献下载"],
+    ["query-rank", "期刊&会议等级查询"],
+    ["export-citation", "引用导出"],
+    ["paper-matrix", "文献矩阵"],
+    ["knowledge-qa", "知识库问答"],
+  ]);
+  window.alert(`${labels.get(action) || "该功能"}开发中`);
+}
+
 function itemValue(item, key) {
+  const structured = item.structured || {};
   switch (key) {
     case "title": return item.title || "未命名文献";
+    case "remark": return structured.remark || "";
+    case "title_zh": return structured.title_zh || "";
+    case "abstract_zh": return structured.abstract_zh || "";
     case "creators": return item.creators_display || "";
     case "year": return item.year || "";
     case "venue": return item.venue || item.type || "";
-    case "rating": return textOf(item.semantic.rating);
+    case "rating": return ratingLabelFromValues(item.semantic.rating);
     case "nested": return textOf(item.semantic.nested);
     case "venue_rank": return textOf(item.semantic.venue_rank);
     case "reading_status": return readingStatus(item).label;
@@ -97,6 +173,56 @@ function itemValue(item, key) {
     case "collections": return textOf((item.collections || []).map((collection) => collection.name));
     default: return "";
   }
+}
+
+function structuredLabel(key) {
+  return new Map([
+    ["remark", "备注"],
+    ["title_zh", "中文标题"],
+    ["abstract_zh", "中文摘要"],
+  ]).get(key) || key;
+}
+
+function isStructuredField(key) {
+  return ["remark", "title_zh", "abstract_zh"].includes(key);
+}
+
+function isStructuredCellEditing(itemKey, field) {
+  return state.editingStructuredCell?.itemKey === itemKey && state.editingStructuredCell?.field === field;
+}
+
+function notePreview(note) {
+  const plain = String(note?.note || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const expanded = state.expandedNotes.has(String(note?.item_id || note?.key || ""));
+  if (expanded || plain.length <= 20) return { text: plain, truncated: false };
+  return { text: `${plain.slice(0, 20)}...`, truncated: true };
+}
+
+function toggleNoteExpanded(note) {
+  const key = String(note?.item_id || note?.key || "");
+  if (!key) return;
+  if (state.expandedNotes.has(key)) state.expandedNotes.delete(key);
+  else state.expandedNotes.add(key);
+  renderDetail();
+}
+
+function beginStructuredCellEdit(item, field) {
+  state.editingStructuredCell = { itemKey: item.key, field };
+  state.structuredCellDraft = item.structured?.[field] || "";
+  renderTable();
+}
+
+function cancelStructuredCellEdit() {
+  state.editingStructuredCell = null;
+  state.structuredCellDraft = "";
+  renderTable();
+}
+
+async function saveStructuredField(itemKey, field, value) {
+  await postJSON(`/api/library/${state.libraryId}/items/${itemKey}/structured-field`, { field, value }, "PATCH");
+  state.editingStructuredCell = null;
+  state.structuredCellDraft = "";
+  await loadState();
 }
 
 function setupSourceForms() {
@@ -215,9 +341,9 @@ function renderTagFilters() {
     host.innerHTML = entries.slice(0, bucket === "plain" ? 80 : 60).map(([tag, count]) => {
       const selected = state.selectedTags.get(bucket)?.has(tag);
       const color = bucket === "nested" || bucket === "plain" ? `style="--tag-color:${tagColor(tag)}"` : "";
-      const label = bucket === "nested" ? displayHashTag(tag) : tag;
+      const label = bucket === "nested" ? displayHashTag(tag) : (bucket === "rating" ? ratingLabelFromValues([tag]) : tag);
       return `<button class="tag-chip ${selected ? "active" : ""}" ${color} data-bucket="${bucket}" data-tag="${escapeHtml(tag)}">${escapeHtml(label)} ${count}</button>`;
-    }).join("") || `<span class="muted">无</span>`;
+    }).join("") || `<span class="muted">暂无</span>`;
     host.querySelectorAll("[data-tag]").forEach((button) => {
       button.addEventListener("click", () => {
         const set = state.selectedTags.get(bucket) || new Set();
@@ -289,9 +415,7 @@ function renderTitleCell(item) {
 }
 
 function ratingCount(item) {
-  const current = item.rating || "";
-  const stars = [...current].filter((char) => ["★", "⭐", "🌟"].includes(char)).length;
-  return stars || Number(current.replace(/\D/g, "")) || 0;
+  return ratingNumberFromValues(item.semantic?.rating || []);
 }
 
 function paintRating(host, value) {
@@ -302,19 +426,22 @@ function paintRating(host, value) {
 
 function renderRatingCell(item) {
   const count = ratingCount(item);
-  if (!state.library?.editable) return `<span class="rating-readonly">${"★".repeat(count)}${"★".repeat(Math.max(0, 5 - count)).replace(/★/g, "☆")}</span>`;
+  if (!state.library?.editable) return `<span class="rating-readonly">${RATING_CONTROL_STAR.repeat(count) || "-"}</span>`;
   return `<div class="rating-control" data-rating-item="${item.key}" data-current-rating="${count}">
-    ${[1, 2, 3, 4, 5].map((value) => `<button type="button" data-rating="${value}" class="${value <= count ? "lit" : ""}">★</button>`).join("")}
+    ${[1, 2, 3, 4, 5].map((value) => `<button type="button" data-rating="${value}" class="${value <= count ? "lit" : ""}">${RATING_CONTROL_STAR}</button>`).join("")}
   </div>`;
 }
 
 function renderNestedCell(item) {
   const tags = item.semantic.nested || [];
+  if (!state.library?.editable) {
+    return tags.map((tag) => `<span class="colored-tag" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">${escapeHtml(displayHashTag(tag))}</span>`).join(" ");
+  }
   const chips = tags.map((tag) => `
     <button class="colored-tag tag-cell-chip" type="button" data-tag-popover="${item.key}" data-focus-tag="${escapeHtml(tag)}" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">
       ${escapeHtml(displayHashTag(tag))}
     </button>`).join("");
-  const add = state.library?.editable ? `<button class="add-tag-chip" type="button" data-tag-popover="${item.key}">+ 标签</button>` : "";
+  const add = `<button class="add-tag-chip" type="button" data-tag-popover="${item.key}">+ 标签</button>`;
   return `${chips}${add}`;
 }
 
@@ -324,8 +451,38 @@ function renderReadingCell(item) {
   return `<button class="reading-chip ${status.key}" type="button" ${editable ? `data-reading-popover="${item.key}"` : "disabled"}>${status.label}</button>`;
 }
 
+function renderStructuredCell(item, field) {
+  const value = item.structured?.[field] || "";
+  const editable = Boolean(state.library?.editable);
+  if (!editable) {
+    return `<div class="structured-preview" title="${escapeHtml(value)}">${escapeHtml(value || "-")}</div>`;
+  }
+  if (isStructuredCellEditing(item.key, field)) {
+    const isLongText = field !== "title_zh";
+    const input = isLongText
+      ? `<textarea data-structured-cell-input="${field}" rows="${field === "abstract_zh" ? "4" : "3"}">${escapeHtml(state.structuredCellDraft)}</textarea>`
+      : `<input data-structured-cell-input="${field}" value="${escapeHtml(state.structuredCellDraft)}">`;
+    return `
+      <div class="structured-cell-editor" data-structured-cell-editor="${item.key}:${field}">
+        ${input}
+        <div class="structured-cell-actions">
+          <button type="button" class="form-action-btn" data-save-structured-cell="${item.key}" data-structured-field="${field}">保存</button>
+          <button type="button" class="ghost-inline-btn" data-cancel-structured-cell>取消</button>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="structured-cell-display">
+      <div class="structured-preview" title="${escapeHtml(value)}">${escapeHtml(value || "-")}</div>
+      <button type="button" class="mini-icon structured-edit-btn" data-edit-structured-cell="${item.key}" data-structured-field="${field}" title="编辑${structuredLabel(field)}">✎</button>
+    </div>
+  `;
+}
+
 function renderTableCell(item, key) {
   if (key === "title") return renderTitleCell(item);
+  if (isStructuredField(key)) return renderStructuredCell(item, key);
   if (key === "rating") return renderRatingCell(item);
   if (key === "nested") return renderNestedCell(item);
   if (key === "reading_status") return renderReadingCell(item);
@@ -341,19 +498,41 @@ function renderTable() {
   if (!head || !body) return;
   const labels = new Map(ALL_COLUMNS);
   const columns = (state.columns.length ? state.columns : DEFAULT_COLUMNS).filter((key) => labels.has(key));
-  head.innerHTML = `<tr>${columns.map((key) => `
+  const allFilteredSelected = isAllFilteredSelected();
+  head.innerHTML = `<tr>
+    <th class="selection-col selection-head-cell">
+      <button type="button" class="selection-toggle-btn ${allFilteredSelected ? "active" : ""}" data-toggle-select-all title="${allFilteredSelected ? "取消全选当前筛选结果" : "全选当前筛选结果"}">
+        ${allFilteredSelected ? "☒" : "☐"}
+      </button>
+    </th>${columns.map((key) => `
     <th data-column-key="${key}" style="${state.columnWidths[key] ? `width:${state.columnWidths[key]}px` : ""}">
       <span>${labels.get(key) || key}</span><span class="resize-handle" data-resize-column="${key}"></span>
     </th>`).join("")}</tr>`;
   body.innerHTML = state.filteredItems.map((item) => `
     <tr data-item-key="${item.key}" class="${state.selectedItem?.key === item.key ? "selected" : ""}">
+      <td class="selection-col selection-cell">
+        <input type="checkbox" class="row-checkbox" data-row-select="${item.key}" ${isItemChecked(item.key) ? "checked" : ""} aria-label="选择条目">
+      </td>
       ${columns.map((key) => `<td class="${key === "title" ? "title-cell" : ""}" style="${state.columnWidths[key] ? `width:${state.columnWidths[key]}px` : ""}">${renderTableCell(item, key)}</td>`).join("")}
     </tr>
   `).join("");
+  head.querySelector("[data-toggle-select-all]")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (isAllFilteredSelected()) clearFilteredSelection();
+    else selectAllFilteredItems();
+    renderTable();
+  });
+  body.querySelectorAll("[data-row-select]").forEach((input) => input.addEventListener("click", (event) => {
+    event.stopPropagation();
+  }));
+  body.querySelectorAll("[data-row-select]").forEach((input) => input.addEventListener("change", (event) => {
+    toggleItemChecked(input.dataset.rowSelect, event.target.checked);
+    renderTable();
+  }));
   body.querySelectorAll("[data-item-key]").forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("button")) return;
-      state.selectedItem = state.items.find((item) => item.key === row.dataset.itemKey);
+      if (event.target.closest("button") || event.target.closest("input")) return;
+      state.selectedItem = state.items.find((item) => item.key === row.dataset.itemKey) || null;
       renderTable();
       renderDetail();
     });
@@ -367,6 +546,23 @@ function renderTable() {
     event.stopPropagation();
     renderReadingPopover(button);
   }));
+  body.querySelectorAll("[data-edit-structured-cell]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const item = state.items.find((value) => value.key === button.dataset.editStructuredCell);
+    if (!item) return;
+    beginStructuredCellEdit(item, button.dataset.structuredField);
+  }));
+  body.querySelectorAll("[data-cancel-structured-cell]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    cancelStructuredCellEdit();
+  }));
+  body.querySelectorAll("[data-save-structured-cell]").forEach((button) => button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const editor = button.closest("[data-structured-cell-editor]");
+    const input = editor?.querySelector("[data-structured-cell-input]");
+    await saveStructuredField(button.dataset.saveStructuredCell, button.dataset.structuredField, input?.value || "");
+  }));
+  body.querySelectorAll("[data-structured-cell-input]").forEach((input) => input.addEventListener("click", (event) => event.stopPropagation()));
   body.querySelectorAll("[data-rating-item]").forEach((host) => {
     const current = Number(host.dataset.currentRating || 0);
     host.querySelectorAll("button").forEach((button) => {
@@ -382,6 +578,7 @@ function renderTable() {
   setupColumnResize();
   document.querySelector("[data-visible-count]").textContent = String(state.filteredItems.length);
   document.querySelector("[data-total-count]").textContent = String(state.items.length);
+  document.querySelector("[data-selected-count]").textContent = String(totalSelectedCount());
 }
 
 function setupColumnResize() {
@@ -413,10 +610,27 @@ function positionPanel(panel, anchor, width = 360) {
   panel.style.top = `${rect.bottom + 8}px`;
 }
 
+function rerenderActiveTagPopover() {
+  const panel = document.querySelector("[data-tag-popover-panel]");
+  if (!panel) return;
+  const anchor = state.activePopoverItemKey ? document.querySelector(`[data-tag-popover="${state.activePopoverItemKey}"]`) : null;
+  if (!anchor) {
+    panel.remove();
+    state.activePopoverItemKey = "";
+    return;
+  }
+  renderTagPopover(anchor);
+}
+
 function renderTagPopover(anchor) {
+  if (!state.library?.editable) return;
   const item = state.items.find((value) => value.key === state.activePopoverItemKey);
   if (!item) return;
-  const existing = new Set(item.tags || []);
+  const currentTags = (item.semantic?.nested || []).map((tag) => normalizeHashTag(tag)).filter(Boolean);
+  const currentTagSet = new Set(currentTags);
+  const availableShortcuts = state.tagShortcuts
+    .map((shortcut) => normalizeHashTag(shortcut.tag))
+    .filter((tag, index, values) => tag && values.indexOf(tag) === index && !currentTagSet.has(tag));
   let panel = document.querySelector("[data-tag-popover-panel]");
   if (!panel) {
     panel = document.createElement("div");
@@ -424,51 +638,71 @@ function renderTagPopover(anchor) {
     panel.dataset.tagPopoverPanel = "1";
     document.body.appendChild(panel);
   }
-  positionPanel(panel, anchor);
+  positionPanel(panel, anchor, 420);
   panel.innerHTML = `
     <div class="popover-head">
       <strong>快捷标签</strong>
-      <button type="button" data-close-popover>×</button>
+      <button type="button" class="tag-icon-btn" data-close-popover>×</button>
     </div>
-    <div class="shortcut-grid">
-      ${state.tagShortcuts.map((shortcut) => {
-        const tag = normalizeHashTag(shortcut.tag);
-        return `
-        <label class="shortcut-pill" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">
-          <input type="checkbox" data-toggle-item-tag="${escapeHtml(tag)}" ${existing.has(tag) ? "checked" : ""}>
-          <span>${escapeHtml(displayHashTag(tag))}</span>
-          <button type="button" data-delete-shortcut="${escapeHtml(tag)}" title="从快捷表删除">×</button>
-        </label>`;
-      }).join("") || `<span class="muted">还没有快捷标签</span>`}
-    </div>
-    <form class="inline-form" data-popover-new-tag>
-      <input name="tag" placeholder="新增标签，例如 VLA/端到端">
-      <button type="submit">添加</button>
-    </form>
+    <section class="popover-section">
+      <h4>当前条目标签</h4>
+      <div class="shortcut-grid" data-current-tag-list>
+        ${currentTags.map((tag) => `
+          <label class="shortcut-pill shortcut-pill-toggle" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">
+            <input type="checkbox" data-current-tag-toggle="${escapeHtml(tag)}" checked>
+            <span>${escapeHtml(displayHashTag(tag))}</span>
+          </label>
+        `).join("") || `<span class="muted">当前条目还没有 # 标签</span>`}
+      </div>
+    </section>
+    <section class="popover-section">
+      <h4>快捷标签</h4>
+      <div class="shortcut-grid" data-shortcut-list>
+        ${availableShortcuts.map((tag) => `
+          <label class="shortcut-pill shortcut-pill-toggle" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">
+            <input type="checkbox" data-shortcut-add-tag="${escapeHtml(tag)}">
+            <span>${escapeHtml(displayHashTag(tag))}</span>
+            <button type="button" class="tag-delete-btn" data-delete-shortcut="${escapeHtml(tag)}" title="从快捷标签删除">×</button>
+          </label>
+        `).join("") || `<span class="muted">没有可添加的快捷标签</span>`}
+      </div>
+      <form class="inline-form" data-shortcut-form>
+        <input name="tag" placeholder="新增标签，例如 VLA/端到端">
+        <button type="submit" class="form-action-btn">添加</button>
+      </form>
+    </section>
   `;
-  panel.querySelector("[data-close-popover]").addEventListener("click", () => panel.remove());
-  panel.querySelectorAll("[data-toggle-item-tag]").forEach((input) => input.addEventListener("change", async () => {
-    const tag = normalizeHashTag(input.dataset.toggleItemTag);
-    if (input.checked) await postJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, { tag });
-    else await deleteJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, { tag });
+  panel.querySelector("[data-close-popover]").addEventListener("click", () => {
+    panel.remove();
+    state.activePopoverItemKey = "";
+  });
+  panel.querySelectorAll("[data-current-tag-toggle]").forEach((input) => input.addEventListener("change", async () => {
+    const tag = normalizeHashTag(input.dataset.currentTagToggle);
+    await deleteJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, { tag });
     await loadState();
-    renderTagPopover(anchor);
+    rerenderActiveTagPopover();
+  }));
+  panel.querySelectorAll("[data-shortcut-add-tag]").forEach((input) => input.addEventListener("change", async () => {
+    const tag = normalizeHashTag(input.dataset.shortcutAddTag);
+    if (!input.checked) return;
+    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, { tag });
+    await loadState();
+    rerenderActiveTagPopover();
   }));
   panel.querySelectorAll("[data-delete-shortcut]").forEach((button) => button.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
     await deleteJSON(`/api/library/${state.libraryId}/tag-shortcuts`, { tag: normalizeHashTag(button.dataset.deleteShortcut) });
     await loadState();
-    renderTagPopover(anchor);
+    rerenderActiveTagPopover();
   }));
-  panel.querySelector("[data-popover-new-tag]").addEventListener("submit", async (event) => {
+  panel.querySelector("[data-shortcut-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const tag = normalizeHashTag(new FormData(event.currentTarget).get("tag"));
     if (!tag || tag === "#") return;
     await postJSON(`/api/library/${state.libraryId}/tag-shortcuts`, { tag });
-    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, { tag });
     await loadState();
-    renderTagPopover(anchor);
+    rerenderActiveTagPopover();
   });
 }
 
@@ -489,7 +723,7 @@ function renderReadingPopover(anchor) {
     ["reading", "在读"],
     ["read", "已读"],
   ];
-  panel.innerHTML = options.map(([key, label]) => `<button type="button" class="${key === current ? "active" : ""}" data-reading-status="${key}">${label}</button>`).join("");
+  panel.innerHTML = options.map(([key, label]) => `<button type="button" class="reading-option ${key} ${key === current ? "active" : ""}" data-reading-status="${key}">${label}</button>`).join("");
   panel.querySelectorAll("[data-reading-status]").forEach((button) => button.addEventListener("click", async () => {
     await postJSON(`/api/library/${state.libraryId}/items/${item.key}/reading-status`, { status: button.dataset.readingStatus }, "PATCH");
     panel.remove();
@@ -501,40 +735,81 @@ function renderDetail() {
   const detail = document.querySelector("[data-detail]");
   const type = document.querySelector("[data-detail-type]");
   const item = state.selectedItem;
-  if (!detail || !item) return;
+  if (!detail || !type) return;
+  if (!item) {
+    type.textContent = "未选择";
+    detail.className = "detail-empty";
+    detail.textContent = "从中间表格选择一篇文献。";
+    return;
+  }
   type.textContent = item.type || "";
   const editable = Boolean(state.library?.editable);
+  const structured = item.structured || {};
+  const detailDraft = state.detailStructuredDraft;
   detail.className = "detail-scroll";
   detail.innerHTML = `
     <section class="detail-card">
       <h3>${escapeHtml(item.title)}</h3>
-      <p class="muted">${escapeHtml(item.creators_full_display || item.creators_display)} · ${escapeHtml(item.year)} · ${escapeHtml(item.venue || item.type)}</p>
+      <p class="muted">${escapeHtml(item.creators_full_display || item.creators_display)} / ${escapeHtml(item.year)} / ${escapeHtml(item.venue || item.type)}</p>
       <p>${escapeHtml(item.fields.abstractNote || "暂无摘要")}</p>
     </section>
     <section class="detail-card">
       <h3>语义标签</h3>
       <div class="field-grid">
-        <span>评分</span><strong>${escapeHtml(textOf(item.semantic.rating) || "-")}</strong>
+        <span>评分</span><strong>${escapeHtml(ratingLabelFromValues(item.semantic.rating) || "-")}</strong>
         <span>#标签</span><strong>${(item.semantic.nested || []).map((tag) => `<span class="colored-tag" style="--tag-color:${tagColor(tag)}" title="${escapeHtml(tag)}">${escapeHtml(displayHashTag(tag))}</span>`).join(" ") || "-"}</strong>
         <span>阅读状态</span><strong><span class="reading-chip ${readingStatus(item).key}">${readingStatus(item).label}</span></strong>
         <span>期刊等级</span><strong>${escapeHtml(textOf(item.semantic.venue_rank) || "-")}</strong>
         <span>普通标签</span><strong>${escapeHtml(textOf(item.semantic.plain) || "-")}</strong>
       </div>
-      ${editable ? `
-      <form class="inline-form" data-add-tag-form>
-        <input name="tag" placeholder="新增 # 标签，例如 VLA/端到端">
-        <button type="submit">添加</button>
-      </form>` : `<p class="muted">只读连接模式不能修改标签。</p>`}
+      ${editable ? `<p class="muted">请在条目表格的 #标签 弹层里管理当前条目和快捷标签。</p>` : `<p class="muted">只读连接模式不能修改标签。</p>`}
+    </section>
+    <section class="detail-card">
+      <div class="detail-card-head">
+        <h3>结构化字段</h3>
+        ${editable ? `<button type="button" class="ghost-btn" data-toggle-structured-detail>${state.detailStructuredEditing ? "取消编辑" : "编辑结构化字段"}</button>` : ""}
+      </div>
+      ${state.detailStructuredEditing ? `
+      <form class="structured-detail-form" data-structured-detail-form>
+        <label class="structured-detail-row">
+          <span>备注</span>
+          <textarea name="remark" rows="4">${escapeHtml(detailDraft.remark || "")}</textarea>
+        </label>
+        <label class="structured-detail-row">
+          <span>中文标题</span>
+          <input name="title_zh" value="${escapeHtml(detailDraft.title_zh || "")}">
+        </label>
+        <label class="structured-detail-row">
+          <span>中文摘要</span>
+          <textarea name="abstract_zh" rows="6">${escapeHtml(detailDraft.abstract_zh || "")}</textarea>
+        </label>
+        <div class="structured-detail-actions">
+          <button type="submit" class="form-action-btn">保存</button>
+        </div>
+      </form>` : `
+      <div class="field-grid structured-field-grid">
+        <span>备注</span><strong>${escapeHtml(structured.remark || "-")}</strong>
+        <span>中文标题</span><strong>${escapeHtml(structured.title_zh || "-")}</strong>
+        <span>中文摘要</span><strong>${escapeHtml(structured.abstract_zh || "-")}</strong>
+      </div>`}
     </section>
     <section class="detail-card">
       <h3>附件与笔记</h3>
       ${(item.attachments || []).map((attachment) => `
         <p class="attachment-line">
           ${attachment.openable ? `<a href="/api/library/${state.libraryId}/attachments/${attachment.key}" target="_blank">${escapeHtml(attachment.display_label)}</a>` : `<span class="muted" title="附件文件缺失或不可直接打开">${escapeHtml(attachment.display_label)}</span>`}
-          <span class="attachment-badge ${attachmentBadgeClass(attachment.kind, attachment.status === "missing")}">${escapeHtml(attachment.kind)} · ${attachment.status === "missing" ? "缺失" : escapeHtml(attachment.status)}</span>
+          <span class="attachment-badge ${attachmentBadgeClass(attachment.kind, attachment.status === "missing")}">${escapeHtml(attachment.kind)} ${attachment.status === "missing" ? "缺失" : escapeHtml(attachment.status)}</span>
         </p>
       `).join("") || `<p class="muted">没有文件附件</p>`}
-      ${(item.notes || []).map((note) => `<p><strong>Note</strong> ${escapeHtml(note.note.replace(/<[^>]*>/g, " ").slice(0, 500))}</p>`).join("")}
+      ${(item.notes || []).map((note) => {
+        const preview = notePreview(note);
+        return `
+          <p class="note-line">
+            <strong>笔记</strong> ${escapeHtml(preview.text || "-")}
+            ${preview.truncated || state.expandedNotes.has(String(note.item_id || note.key || "")) ? `<button type="button" class="note-toggle-btn" data-note-toggle="${escapeHtml(String(note.item_id || note.key || ""))}" title="${state.expandedNotes.has(String(note.item_id || note.key || "")) ? "收起" : "展开"}">${state.expandedNotes.has(String(note.item_id || note.key || "")) ? "⌃" : "⌄"}</button>` : ""}
+          </p>
+        `;
+      }).join("") || `<p class="muted">没有笔记</p>`}
     </section>
     <section class="detail-card">
       <h3>所在文件夹</h3>
@@ -550,7 +825,7 @@ function renderDetail() {
           <option value="true">加入</option>
           <option value="false">移出</option>
         </select>
-        <button type="submit">应用</button>
+        <button type="submit" class="form-action-btn">应用</button>
       </form>` : `<p class="muted">只读连接模式不能调整文件夹归属。</p>`}
     </section>
     <section class="detail-card">
@@ -568,18 +843,10 @@ function renderDetail() {
           <option value="extra">extra</option>
         </select>
         <input name="value" placeholder="新值">
-        <button type="submit">保存</button>
+        <button type="submit" class="form-action-btn">保存</button>
       </form>` : ""}
     </section>
   `;
-  detail.querySelector("[data-add-tag-form]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-    payload.tag = normalizeHashTag(payload.tag);
-    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/tags`, payload);
-    await postJSON(`/api/library/${state.libraryId}/tag-shortcuts`, { tag: payload.tag });
-    await loadState();
-  });
   detail.querySelector("[data-edit-field-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
@@ -591,6 +858,38 @@ function renderDetail() {
     const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
     payload.enabled = payload.enabled === "true";
     await postJSON(`/api/library/${state.libraryId}/items/${item.key}/collections`, payload);
+    await loadState();
+  });
+  detail.querySelectorAll("[data-note-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const note = (item.notes || []).find((value) => String(value.item_id || value.key || "") === button.dataset.noteToggle);
+    if (!note) return;
+    toggleNoteExpanded(note);
+  }));
+  detail.querySelector("[data-toggle-structured-detail]")?.addEventListener("click", () => {
+    if (state.detailStructuredEditing) {
+      state.detailStructuredEditing = false;
+    } else {
+      state.detailStructuredDraft = {
+        remark: structured.remark || "",
+        title_zh: structured.title_zh || "",
+        abstract_zh: structured.abstract_zh || "",
+      };
+      state.detailStructuredEditing = true;
+    }
+    renderDetail();
+  });
+  detail.querySelector("[data-structured-detail-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    state.detailStructuredDraft = {
+      remark: String(payload.remark || ""),
+      title_zh: String(payload.title_zh || ""),
+      abstract_zh: String(payload.abstract_zh || ""),
+    };
+    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/structured-field`, { field: "remark", value: state.detailStructuredDraft.remark }, "PATCH");
+    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/structured-field`, { field: "title_zh", value: state.detailStructuredDraft.title_zh }, "PATCH");
+    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/structured-field`, { field: "abstract_zh", value: state.detailStructuredDraft.abstract_zh }, "PATCH");
+    state.detailStructuredEditing = false;
     await loadState();
   });
 }
@@ -648,57 +947,26 @@ async function loadState() {
   if (!data.ok) throw new Error(data.error || "加载失败");
   state.library = data.library;
   state.items = data.items || [];
+  const validKeys = new Set(state.items.map((item) => String(item.key || "")).filter(Boolean));
+  state.selectedItemKeys = new Set([...state.selectedItemKeys].filter((key) => validKeys.has(key)));
   state.collections = data.collections || [];
   state.tagShortcuts = data.tag_shortcuts || [];
   state.columns = (data.library.columns || DEFAULT_COLUMNS).filter((key) => new Map(ALL_COLUMNS).has(key));
   state.columnWidths = data.library.column_widths || {};
   state.plainCollapsed = data.library.plain_tags_collapsed !== false;
   if (state.selectedItem) state.selectedItem = state.items.find((item) => item.key === state.selectedItem.key) || null;
+  if (state.selectedItem && state.detailStructuredEditing) {
+    state.detailStructuredDraft = {
+      remark: state.selectedItem.structured?.remark || "",
+      title_zh: state.selectedItem.structured?.title_zh || "",
+      abstract_zh: state.selectedItem.structured?.abstract_zh || "",
+    };
+  }
   document.querySelector("[data-unsynced]").textContent = `未同步 ${data.library.unsynced_count || 0}`;
   document.querySelector("[data-create-collection-form]").hidden = !data.library.editable;
   applyFilters();
   renderDetail();
-}
-
-function renderGlobalShortcutPanel(anchor) {
-  let panel = document.querySelector("[data-tag-popover-panel]");
-  if (!panel) {
-    panel = document.createElement("div");
-    panel.className = "tag-popover";
-    panel.dataset.tagPopoverPanel = "1";
-    document.body.appendChild(panel);
-  }
-  positionPanel(panel, anchor);
-  panel.innerHTML = `
-    <div class="popover-head">
-      <strong>快捷标签表</strong>
-      <button type="button" data-close-popover>×</button>
-    </div>
-    <div class="shortcut-grid">
-      ${state.tagShortcuts.map((shortcut) => {
-        const tag = normalizeHashTag(shortcut.tag);
-        return `<span class="shortcut-pill" style="--tag-color:${tagColor(tag)}"><span>${escapeHtml(displayHashTag(tag))}</span><button type="button" data-delete-shortcut="${escapeHtml(tag)}">×</button></span>`;
-      }).join("") || `<span class="muted">还没有快捷标签</span>`}
-    </div>
-    <form class="inline-form" data-global-new-tag>
-      <input name="tag" placeholder="新增标签，例如 多提示词">
-      <button type="submit">添加</button>
-    </form>
-  `;
-  panel.querySelector("[data-close-popover]").addEventListener("click", () => panel.remove());
-  panel.querySelectorAll("[data-delete-shortcut]").forEach((button) => button.addEventListener("click", async () => {
-    await deleteJSON(`/api/library/${state.libraryId}/tag-shortcuts`, { tag: normalizeHashTag(button.dataset.deleteShortcut) });
-    await loadState();
-    renderGlobalShortcutPanel(anchor);
-  }));
-  panel.querySelector("[data-global-new-tag]").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const tag = normalizeHashTag(new FormData(event.currentTarget).get("tag"));
-    if (!tag || tag === "#") return;
-    await postJSON(`/api/library/${state.libraryId}/tag-shortcuts`, { tag });
-    await loadState();
-    renderGlobalShortcutPanel(anchor);
-  });
+  rerenderActiveTagPopover();
 }
 
 function setupLibraryPage() {
@@ -722,9 +990,9 @@ function setupLibraryPage() {
     event.currentTarget.reset();
     await loadState();
   });
-  document.querySelector("[data-manage-shortcuts]")?.addEventListener("click", (event) => {
-    renderGlobalShortcutPanel(event.currentTarget);
-  });
+  document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
+    notifyFeatureInProgress(button.dataset.bulkAction);
+  }));
   setupColumnsPanel();
   loadState().catch((error) => window.alert(error.message));
 }
