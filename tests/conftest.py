@@ -34,7 +34,21 @@ def create_fixture_zotero(root: Path) -> Path:
         CREATE TABLE deletedItems (itemID INTEGER PRIMARY KEY);
         """
     )
-    conn.executemany("INSERT INTO itemTypes VALUES (?, ?)", [(1, "journalArticle"), (2, "attachment"), (3, "note")])
+    conn.executemany(
+        "INSERT INTO itemTypes VALUES (?, ?)",
+        [
+            (1, "journalArticle"),
+            (2, "attachment"),
+            (3, "note"),
+            (4, "conferencePaper"),
+            (5, "preprint"),
+            (6, "standard"),
+            (7, "webpage"),
+            (8, "computerProgram"),
+            (9, "magazineArticle"),
+            (10, "newspaperArticle"),
+        ],
+    )
     conn.executemany(
         "INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -44,6 +58,13 @@ def create_fixture_zotero(root: Path) -> Path:
             (4, 2, "2026-01-01", "2026-01-02", 1, "MISS0001", 0, 1),
             (5, 2, "2026-01-01", "2026-01-02", 1, "HTML01", 0, 1),
             (6, 2, "2026-01-01", "2026-01-02", 1, "IMAGE01", 0, 1),
+            (7, 4, "2026-01-03", "2026-01-04", 1, "ITEM0002", 0, 1),
+            (8, 5, "2026-01-05", "2026-01-06", 1, "ITEM0003", 0, 1),
+            (9, 6, "2026-01-07", "2026-01-08", 1, "ITEM0004", 0, 1),
+            (10, 7, "2026-01-09", "2026-01-10", 1, "ITEM0005", 0, 1),
+            (11, 8, "2026-01-11", "2026-01-12", 1, "ITEM0006", 0, 1),
+            (12, 9, "2026-01-13", "2026-01-14", 1, "ITEM0007", 0, 1),
+            (13, 10, "2026-01-15", "2026-01-16", 1, "ITEM0008", 0, 1),
         ],
     )
     fields = [(1, "title"), (2, "date"), (3, "publicationTitle"), (4, "DOI"), (5, "abstractNote"), (6, "extra")]
@@ -58,6 +79,48 @@ def create_fixture_zotero(root: Path) -> Path:
     conn.executemany("INSERT INTO fields VALUES (?, ?)", fields)
     conn.executemany("INSERT INTO itemDataValues VALUES (?, ?)", values)
     conn.executemany("INSERT INTO itemData VALUES (1, ?, ?)", [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)])
+    conn.executemany(
+        "INSERT INTO itemDataValues VALUES (?, ?)",
+        [
+            (7, "Vision-Language Conference Paper"),
+            (8, "2025-05-01"),
+            (9, "ICRA"),
+            (10, "Preprint Example"),
+            (11, "2025-06-01"),
+            (12, "arXiv"),
+            (13, "标准样例"),
+            (14, "2025-07-01"),
+            (15, "网页样例"),
+            (16, "2025-08-01"),
+            (17, "程序样例"),
+            (18, "2025-09-01"),
+            (19, "杂志样例"),
+            (20, "2025-10-01"),
+            (21, "报纸样例"),
+            (22, "2025-11-01"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO itemData VALUES (?, ?, ?)",
+        [
+            (7, 1, 7),
+            (7, 2, 8),
+            (7, 3, 9),
+            (8, 1, 10),
+            (8, 2, 11),
+            (8, 3, 12),
+            (9, 1, 13),
+            (9, 2, 14),
+            (10, 1, 15),
+            (10, 2, 16),
+            (11, 1, 17),
+            (11, 2, 18),
+            (12, 1, 19),
+            (12, 2, 20),
+            (13, 1, 21),
+            (13, 2, 22),
+        ],
+    )
     conn.execute("INSERT INTO creatorTypes VALUES (1, 'author')")
     conn.execute("INSERT INTO creators VALUES (1, 'Moo Jin', 'Kim', 0)")
     conn.execute("INSERT INTO itemCreators VALUES (1, 1, 1, 0)")

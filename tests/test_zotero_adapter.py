@@ -17,17 +17,28 @@ def test_adapter_reads_items_collections_tags_and_attachments(zotero_fixture: Pa
     library = create_read_only_source(zotero_fixture)
     repo = ZoteroRepository(library)
     state = repo.state()
+    item = next(item for item in state["items"] if item["key"] == "ITEM0001")
     assert state["collections"][0]["name"] == "VLA"
-    assert state["items"][0]["title"] == "OpenVLA"
-    assert state["items"][0]["semantic"]["rating"] == ["★★★★★"]
-    assert "#有代码" in state["items"][0]["semantic"]["nested"]
-    assert "/done" in state["items"][0]["semantic"]["reading_status"]
-    assert state["items"][0]["attachments"][0]["resolved_path"].endswith("storage\\ATTACH01\\paper.pdf") or state["items"][0]["attachments"][0]["resolved_path"].endswith("storage/ATTACH01/paper.pdf")
-    assert state["items"][0]["attachments"][0]["kind"] == "pdf"
-    assert state["items"][0]["attachments"][0]["status"] == "openable"
-    assert any(attachment["status"] == "missing" for attachment in state["items"][0]["attachments"])
-    assert any(badge["label"] == "PDF" for badge in state["items"][0]["attachment_badges"])
-    assert any(badge["label"] == "Note" for badge in state["items"][0]["attachment_badges"])
+    assert item["title"] == "OpenVLA"
+    assert item["semantic"]["rating"] == ["★★★★★"]
+    assert "#有代码" in item["semantic"]["nested"]
+    assert "/done" in item["semantic"]["reading_status"]
+    assert item["attachments"][0]["resolved_path"].endswith("storage\\ATTACH01\\paper.pdf") or item["attachments"][0]["resolved_path"].endswith("storage/ATTACH01/paper.pdf")
+    assert item["attachments"][0]["kind"] == "pdf"
+    assert item["attachments"][0]["status"] == "openable"
+    assert any(attachment["status"] == "missing" for attachment in item["attachments"])
+    assert any(badge["label"] == "PDF" for badge in item["attachment_badges"])
+    assert any(badge["label"] == "Note" for badge in item["attachment_badges"])
+    assert {item["type"] for item in state["items"]} >= {
+        "journalArticle",
+        "conferencePaper",
+        "preprint",
+        "standard",
+        "webpage",
+        "computerProgram",
+        "magazineArticle",
+        "newspaperArticle",
+    }
 
 
 def test_read_only_blocks_edits(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

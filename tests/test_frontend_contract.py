@@ -23,6 +23,17 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "function ratingLabelFromValues" in app_js
     assert "const RATING_STAR = \"⭐\"" in app_js
     assert "const RATING_CONTROL_STAR = \"⭐\"" in app_js
+    assert "const ITEM_TYPE_META" in app_js
+    assert "const ITEM_TYPE_ALIASES" in app_js
+    assert "function normalizeItemTypeKey" in app_js
+    assert "function itemTypeMeta" in app_js
+    assert "function itemTypeLabel" in app_js
+    assert "computerProgram" in app_js
+    assert "webpage" in app_js
+    assert "magazineArticle" in app_js
+    assert "newspaperArticle" in app_js
+    assert "webPage: \"webpage\"" in app_js
+    assert "software: \"computerProgram\"" in app_js
     assert "data-edit-structured-cell" in app_js
     assert "data-save-structured-cell" in app_js
     assert "/structured-field" in app_js
@@ -33,6 +44,8 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-selected-count" in app_js
     assert "data-bulk-action" in app_js
     assert "function renderTitleCell" in app_js
+    assert "title-primary" in app_js
+    assert "title-secondary" in app_js
     assert "data-add-tag-form" not in app_js
     assert "renderGlobalShortcutPanel" not in app_js
     assert "data-resize-column" in app_js
@@ -40,6 +53,8 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "querySelectorAll(\"[data-open-columns]\")" in app_js
     assert "data-reading-popover" in app_js
     assert "class=\"reading-option" in app_js
+    assert "data-semantic-filter=\"type\"" in library_html
+    assert "type-badge" in app_js
     assert "normalizeHashTag" in app_js
     assert "attachment_badges" in app_js
     assert "笔记" in app_js
@@ -71,6 +86,11 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".structured-detail-form" in app_css
     assert ".shortcut-pill-toggle .tag-delete-btn" in app_css
     assert ".reading-option" in app_css
+    assert ".type-badge" in app_css
+    assert ".title-primary" in app_css
+    assert ".title-secondary" in app_css
+    assert ".title-text" in app_css
+    assert ".type-group-academic" in app_css
     assert ".note-line" in app_css
     assert ".note-toggle-btn" in app_css
     assert ".item-table th > span:first-child" in app_css

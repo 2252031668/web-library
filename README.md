@@ -7,9 +7,10 @@ This project is intentionally separate from Guangming AI Workbench. It focuses o
 ## Current Capabilities
 
 - Zotero-style three-pane interface: collection tree, dense item table, and detail panel.
-- Nested collection tree with tag filters for rating, `#` tags, venue rank, reading status, and plain tags.
+- Nested collection tree with tag filters for rating, item type, `#` tags, venue rank, reading status, and plain tags.
 - Configurable table columns, column widths, and compact bulk-action toolbar layout.
 - Row selection with persistent multi-select state across filtering, folder switches, and local state refreshes.
+- Chinese item-type badges in the title column, with type labels derived from Zotero native `itemTypes.typeName` and normalized against Zotero official type keys.
 - Semantic tag parsing from Zotero native tags for:
   - `#` tags
   - reading status
@@ -24,6 +25,13 @@ This project is intentionally separate from Guangming AI Workbench. It focuses o
 - Note preview folding in the detail panel.
 - Read-only source connection for safe browsing of a real Zotero data directory.
 - Editable local-copy mode that writes only to an app-managed clone.
+
+## Recent UI Highlights
+
+- Official Zotero item-type normalization on the frontend, including Chinese type badges and a dedicated type filter.
+- Shared library-level shortcut tags for fast `#` tag assignment without mutating existing item tags when shortcuts are removed.
+- Structured field extraction and writeback for `remark`, `title_zh`, and `abstract_zh`, with table-cell editing and detail-panel editing.
+- Persistent multi-select checkboxes across filtering and folder switches, with a placeholder bulk-action toolbar for future batch workflows.
 
 ## Source Modes
 

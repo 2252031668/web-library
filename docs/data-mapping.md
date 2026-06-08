@@ -60,6 +60,7 @@
 
 | 网页字段 | 前端显示 | Zotero 来源 | 写回规则 |
 | --- | --- | --- | --- |
+| 条目类型 | `item.type`，前端可映射成中文类型徽标与中文详情文案 | `itemTypes.typeName` | 当前只读展示，不写回；中文映射 key 以 Zotero 官方 schema canonical key 为准，不修改 Zotero 原生字段 |
 | 标题 | `item.title` | `fields.title` 对应 `itemDataValues.value` | 只允许写 Zotero 已存在字段名，通过 `itemData/itemDataValues` 更新值；禁止新增 `fields.fieldName` |
 | 作者 | `creators_display`, `creators_full_display` | `creators`, `itemCreators`, `creatorTypes` | 当前不写回 |
 | 年份 | `item.year` | `fields.date` | 当前由 `date` 派生；若编辑日期，写回 `date` 原生字段 |

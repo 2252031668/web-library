@@ -19,6 +19,49 @@ const READ_TAGS = new Set(["/done", "done", "已读", "read"]);
 const READING_TAGS = new Set(["/reading", "reading", "在读"]);
 const RATING_STAR = "⭐";
 const RATING_CONTROL_STAR = "⭐";
+const ITEM_TYPE_META = {
+  journalArticle: { labelZh: "期刊", group: "academic", color: "#0f766e" },
+  conferencePaper: { labelZh: "会议", group: "academic", color: "#0ea5a4" },
+  thesis: { labelZh: "学位", group: "academic", color: "#0891b2" },
+  preprint: { labelZh: "预印", group: "academic", color: "#2563eb" },
+  book: { labelZh: "图书", group: "academic", color: "#1d4ed8" },
+  bookSection: { labelZh: "章节", group: "academic", color: "#3b82f6" },
+  report: { labelZh: "报告", group: "academic", color: "#14b8a6" },
+  encyclopediaArticle: { labelZh: "百科", group: "academic", color: "#22c55e" },
+  dictionaryEntry: { labelZh: "词典", group: "academic", color: "#16a34a" },
+  standard: { labelZh: "标准", group: "academic", color: "#06b6d4" },
+  dataset: { labelZh: "数据集", group: "academic", color: "#0ea5e9" },
+  webpage: { labelZh: "网页", group: "media", color: "#0f6f91" },
+  blogPost: { labelZh: "博客", group: "media", color: "#0369a1" },
+  forumPost: { labelZh: "论坛", group: "media", color: "#0284c7" },
+  document: { labelZh: "文档", group: "media", color: "#0b7295" },
+  magazineArticle: { labelZh: "杂志", group: "media", color: "#075985" },
+  newspaperArticle: { labelZh: "报纸", group: "media", color: "#0369a1" },
+  audioRecording: { labelZh: "音频", group: "media", color: "#0891b2" },
+  videoRecording: { labelZh: "视频", group: "media", color: "#0ea5e9" },
+  film: { labelZh: "电影", group: "media", color: "#38bdf8" },
+  podcast: { labelZh: "播客", group: "media", color: "#06b6d4" },
+  radioBroadcast: { labelZh: "广播", group: "media", color: "#0284c7" },
+  tvBroadcast: { labelZh: "电视", group: "media", color: "#38bdf8" },
+  bill: { labelZh: "法案", group: "legal", color: "#a16207" },
+  statute: { labelZh: "法规", group: "legal", color: "#b45309" },
+  case: { labelZh: "案例", group: "legal", color: "#c2410c" },
+  hearing: { labelZh: "听证", group: "legal", color: "#d97706" },
+  manuscript: { labelZh: "手稿", group: "other", color: "#7c3aed" },
+  letter: { labelZh: "信件", group: "other", color: "#9333ea" },
+  artwork: { labelZh: "艺术", group: "other", color: "#c026d3" },
+  map: { labelZh: "地图", group: "other", color: "#a855f7" },
+  patent: { labelZh: "专利", group: "other", color: "#db2777" },
+  interview: { labelZh: "访谈", group: "other", color: "#e11d48" },
+  presentation: { labelZh: "演示", group: "other", color: "#be185d" },
+  email: { labelZh: "邮件", group: "other", color: "#ec4899" },
+  instantMessage: { labelZh: "私信", group: "other", color: "#d946ef" },
+  computerProgram: { labelZh: "软件", group: "other", color: "#8b5cf6" },
+};
+const ITEM_TYPE_ALIASES = {
+  webPage: "webpage",
+  software: "computerProgram",
+};
 
 const state = {
   libraryId: "",
@@ -103,6 +146,25 @@ function readingStatus(item) {
   if (values.some((value) => READ_TAGS.has(value))) return { key: "read", label: "已读", tag: "/done" };
   if (values.some((value) => READING_TAGS.has(value))) return { key: "reading", label: "在读", tag: "/reading" };
   return { key: "unread", label: "未读", tag: "" };
+}
+
+function normalizeItemTypeKey(typeKey) {
+  const value = String(typeKey || "").trim();
+  if (!value) return "";
+  return ITEM_TYPE_ALIASES[value] || value;
+}
+
+function itemTypeMeta(typeKey) {
+  const raw = String(typeKey || "").trim();
+  const normalized = normalizeItemTypeKey(raw);
+  if (!normalized) return { labelZh: "未知", group: "other", color: "#64748b", raw: "", key: "" };
+  const meta = ITEM_TYPE_META[normalized];
+  if (meta) return { ...meta, raw: raw || normalized, key: normalized };
+  return { labelZh: raw || normalized, group: "other", color: "#64748b", raw: raw || normalized, key: normalized };
+}
+
+function itemTypeLabel(typeKey) {
+  return itemTypeMeta(typeKey).labelZh;
 }
 
 function isItemChecked(itemKey) {
@@ -318,7 +380,7 @@ function renderTree() {
 }
 
 function renderTagFilters() {
-  const buckets = ["rating", "nested", "venue_rank", "reading_status", "plain"];
+  const buckets = ["rating", "type", "nested", "venue_rank", "reading_status", "plain"];
   buckets.forEach((bucket) => {
     const host = document.querySelector(`[data-semantic-filter="${bucket}"]`);
     if (!host) return;
@@ -328,6 +390,11 @@ function renderTagFilters() {
     }
     const counts = new Map();
     state.items.forEach((item) => {
+      if (bucket === "type") {
+        const typeKey = normalizeItemTypeKey(item.type);
+        if (typeKey) counts.set(typeKey, (counts.get(typeKey) || 0) + 1);
+        return;
+      }
       if (bucket === "reading_status") {
         const label = readingStatus(item).label;
         counts.set(label, (counts.get(label) || 0) + 1);
@@ -340,8 +407,12 @@ function renderTagFilters() {
     if (bucket === "plain" && search) entries = entries.filter(([tag]) => tag.toLowerCase().includes(search));
     host.innerHTML = entries.slice(0, bucket === "plain" ? 80 : 60).map(([tag, count]) => {
       const selected = state.selectedTags.get(bucket)?.has(tag);
-      const color = bucket === "nested" || bucket === "plain" ? `style="--tag-color:${tagColor(tag)}"` : "";
-      const label = bucket === "nested" ? displayHashTag(tag) : (bucket === "rating" ? ratingLabelFromValues([tag]) : tag);
+      const color = bucket === "nested" || bucket === "plain"
+        ? `style="--tag-color:${tagColor(tag)}"`
+        : (bucket === "type" ? `style="--tag-color:${itemTypeMeta(tag).color}"` : "");
+      const label = bucket === "nested"
+        ? displayHashTag(tag)
+        : (bucket === "rating" ? ratingLabelFromValues([tag]) : (bucket === "type" ? itemTypeLabel(tag) : tag));
       return `<button class="tag-chip ${selected ? "active" : ""}" ${color} data-bucket="${bucket}" data-tag="${escapeHtml(tag)}">${escapeHtml(label)} ${count}</button>`;
     }).join("") || `<span class="muted">暂无</span>`;
     host.querySelectorAll("[data-tag]").forEach((button) => {
@@ -366,7 +437,9 @@ function setupPlainToggle() {
 function matchesSelectedTags(item) {
   for (const [bucket, tags] of state.selectedTags.entries()) {
     if (!tags.size) continue;
-    const values = bucket === "reading_status" ? new Set([readingStatus(item).label]) : new Set(item.semantic[bucket] || []);
+    const values = bucket === "reading_status"
+      ? new Set([readingStatus(item).label])
+      : (bucket === "type" ? new Set([normalizeItemTypeKey(item.type)].filter(Boolean)) : new Set(item.semantic[bucket] || []));
     for (const tag of tags) {
       if (!values.has(tag)) return false;
     }
@@ -384,7 +457,16 @@ function applyFilters() {
     }
     if (!matchesSelectedTags(item)) return false;
     if (query) {
-      const haystack = [item.title, item.creators_full_display, item.creators_display, item.venue, item.tags.join(" ")].join(" ").toLowerCase();
+      const haystack = [
+        item.title,
+        item.creators_full_display,
+        item.creators_display,
+        item.venue,
+        item.type,
+        normalizeItemTypeKey(item.type),
+        itemTypeLabel(item.type),
+        item.tags.join(" "),
+      ].join(" ").toLowerCase();
       if (!haystack.includes(query)) return false;
     }
     return true;
@@ -401,15 +483,19 @@ function attachmentBadgeClass(label, missing = false) {
 }
 
 function renderTitleCell(item) {
+  const typeMeta = itemTypeMeta(item.type);
   const badges = (item.attachment_badges || []).map((badge) => {
     const cls = attachmentBadgeClass(badge.label, badge.missing);
     const title = badge.missing ? "附件文件缺失" : "";
     return `<span class="attachment-badge ${cls}" title="${title}">${escapeHtml(badge.label)} ${badge.count}</span>`;
   }).join("");
   return `
-    <div class="title-line">
-      <span>${escapeHtml(item.title || "未命名文献")}</span>
-      ${badges}
+    <div class="title-stack">
+      <div class="title-primary">
+        <span class="type-badge type-group-${typeMeta.group}" style="--type-color:${typeMeta.color}" title="${escapeHtml(typeMeta.raw || typeMeta.labelZh)}">${escapeHtml(typeMeta.labelZh)}</span>
+        <span class="title-text">${escapeHtml(item.title || "未命名文献")}</span>
+      </div>
+      ${badges ? `<div class="title-secondary">${badges}</div>` : ""}
     </div>
   `;
 }
@@ -742,7 +828,7 @@ function renderDetail() {
     detail.textContent = "从中间表格选择一篇文献。";
     return;
   }
-  type.textContent = item.type || "";
+  type.textContent = itemTypeLabel(item.type);
   const editable = Boolean(state.library?.editable);
   const structured = item.structured || {};
   const detailDraft = state.detailStructuredDraft;
@@ -750,7 +836,7 @@ function renderDetail() {
   detail.innerHTML = `
     <section class="detail-card">
       <h3>${escapeHtml(item.title)}</h3>
-      <p class="muted">${escapeHtml(item.creators_full_display || item.creators_display)} / ${escapeHtml(item.year)} / ${escapeHtml(item.venue || item.type)}</p>
+      <p class="muted">${escapeHtml(item.creators_full_display || item.creators_display)} / ${escapeHtml(item.year)} / ${escapeHtml(item.venue || itemTypeLabel(item.type))}</p>
       <p>${escapeHtml(item.fields.abstractNote || "暂无摘要")}</p>
     </section>
     <section class="detail-card">
