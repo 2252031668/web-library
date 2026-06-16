@@ -31,6 +31,7 @@
 | `itemCreators` | `itemID`, `creatorID`, `creatorTypeID`, `orderIndex` | 条目和创作者的关联表 | 按顺序读取作者列表 |
 | `itemAttachments` | `itemID`, `parentItemID`, `linkMode`, `path`, `contentType`, `charsetID` | 附件元数据 | 解析 PDF、HTML、图片、链接、外部文件 |
 | `itemNotes` | `itemID`, `parentItemID`, `note`, `title` | Zotero 笔记内容 | 读取条目下的笔记摘要 |
+| `itemAnnotations` | `itemID`, `parentItemID`, `type`, `text`, `comment`, `color`, `pageLabel`, `sortIndex`, `position`, `isExternal` | Zotero PDF 标注内容 | 读取和写入 PDF 高亮、下划线；标注也是 `items` 中的 annotation item |
 | `deletedItems` | `itemID` | 已删除条目标记 | 标记回收站条目 |
 
 ## 后端状态模型
@@ -83,6 +84,29 @@
 | 文件夹 | `item.collections` | `collections` + `collectionItems` | 通过插入或删除 `collectionItems` 调整归属 |
 | 附件 | `item.attachments` | 子 item：`items.itemType = attachment` + `itemAttachments` + 可选 `storage/` 文件 | 本地副本模式可新增、重命名、删除；不新增 Zotero schema |
 | 笔记 | `item.notes` | `itemNotes.note` | 当前只读 |
+| PDF 标注 | reader 页面高亮/下划线 | 子 item：`items.itemType = annotation` + `itemAnnotations`，父级是 PDF 附件 item | 本地副本模式可新增高亮和下划线；不写入 PDF 文件，不新增 Zotero schema |
+
+## 文献研读与 PDF 标注规则
+
+“文献研读”v1 只支持 PDF 附件。PDF 附件仍然按 Zotero 原生附件结构读取：主文献条目下面挂 `attachment` 子 item，PDF 文件路径来自 `itemAttachments.path`，`storage:<filename>` 对应 `storage/<attachment_key>/<filename>`。
+
+阅读器规则：
+
+- 前端使用本地 vendored PDF.js 渲染 PDF，不引入单独前端构建链。
+- 左侧目录只读取 PDF 内置 outline；没有内置目录时显示“暂无目录”，不做启发式标题识别。
+- 中间 PDF 连续上下滚动；左右分栏宽度和目录折叠状态只保存在浏览器 localStorage。
+- 右侧智能体对话在 v1 只是占位，不读取或写入数据库。
+
+标注写回规则：
+
+- 高亮和下划线不写入 PDF 文件本体，只写 Zotero 原生 `itemAnnotations`。
+- 每个标注同时是 `items` 表中的一个 `annotation` item，`itemAnnotations.itemID` 指向该 annotation item。
+- `itemAnnotations.parentItemID` 必须指向 PDF 附件 item，不指向主文献条目。
+- 高亮类型写 `type = 1`，下划线写 `type = 5`。
+- `position` 保存 Zotero 兼容 JSON，例如 `{"pageIndex":0,"rects":[[x1,y1,x2,y2]]}`。
+- `rects` 坐标由 PDF.js viewport 坐标转换为 PDF page 坐标后保存；展示时再转换回当前 viewport 坐标。
+- 新增标注只允许本地副本模式；只读连接模式可以阅读 PDF 和查看已有标注，但不能新增标注。
+- v1 不实现删除标注、改色、评论、ink/image/text annotation、多标签阅读或全文搜索。
 
 ## 添加条目导入规则
 

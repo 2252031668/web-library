@@ -31,6 +31,7 @@ def create_fixture_zotero(root: Path) -> Path:
         CREATE TABLE itemTags (itemID INTEGER, tagID INTEGER, type INTEGER, PRIMARY KEY (itemID, tagID));
         CREATE TABLE itemAttachments (itemID INTEGER PRIMARY KEY, parentItemID INTEGER, linkMode INTEGER, path TEXT, contentType TEXT, charsetID INTEGER);
         CREATE TABLE itemNotes (itemID INTEGER PRIMARY KEY, parentItemID INTEGER, note TEXT, title TEXT);
+        CREATE TABLE itemAnnotations (itemID INTEGER PRIMARY KEY, parentItemID INT, type INTEGER, authorName TEXT, text TEXT, comment TEXT, color TEXT, pageLabel TEXT, sortIndex TEXT, position TEXT, isExternal INT);
         CREATE TABLE deletedItems (itemID INTEGER PRIMARY KEY);
         """
     )
@@ -40,6 +41,7 @@ def create_fixture_zotero(root: Path) -> Path:
             (1, "journalArticle"),
             (2, "attachment"),
             (3, "note"),
+            (14, "annotation"),
             (4, "conferencePaper"),
             (5, "preprint"),
             (6, "standard"),
@@ -152,6 +154,11 @@ def create_fixture_zotero(root: Path) -> Path:
     conn.execute("INSERT INTO itemAttachments VALUES (5, 1, 1, 'storage:snapshot.html', 'text/html', NULL)")
     conn.execute("INSERT INTO itemAttachments VALUES (6, 1, 1, 'storage:image.png', 'image/png', NULL)")
     conn.execute("INSERT INTO itemNotes VALUES (3, 1, '<p>note</p>', 'Note')")
+    conn.execute("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (14, 14, "2026-01-01", "2026-01-02", 1, "ANNOT001", 0, 1))
+    conn.execute(
+        "INSERT INTO itemAnnotations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (14, 2, 1, None, "existing highlight", None, "#2ea8e5", "1", "00000|000100|00020", '{"pageIndex":0,"rects":[[10,20,30,40]]}', 0),
+    )
     conn.commit()
     conn.close()
     return root

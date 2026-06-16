@@ -10,6 +10,7 @@
   <aside class="rail">
     <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
     <button class="rail-btn active" title="文库">库</button>
+    <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
     <button class="rail-btn" title="设置" data-open-columns>设</button>
   </aside>
   <main class="workspace">
@@ -21,7 +22,7 @@
       <div class="topbar-actions">
         <span class="mode-pill {{ 'readonly' if library.mode == 'read_only_connection' else 'copy' }}">{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}</span>
         <span class="mode-pill" data-unsynced>未同步 0</span>
-        <a class="ghost-btn" href="{{ url_for('index') }}">源管理</a>
+        <a class="nav-action-btn" href="{{ url_for('index') }}">源管理</a>
       </div>
     </header>
 
@@ -71,6 +72,7 @@
               <button class="bulk-action-btn" type="button" data-bulk-action="delete-items">删除条目</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="move-items">移动条目</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="edit-attachments">附件编辑</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="read-paper">文献研读</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="download-papers">文献下载</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="query-rank">期刊&会议等级查询</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="export-citation">引用导出</button>
@@ -109,7 +111,7 @@
         <button type="button" class="icon-btn" data-close-columns>×</button>
       </div>
       <div data-column-list></div>
-      <button type="button" data-save-columns>保存字段设置</button>
+      <button type="button" class="form-action-btn column-save-btn" data-save-columns>保存字段设置</button>
     </section>
   </div>
 
@@ -118,6 +120,7 @@
   <div class="floating-panel" data-delete-items-modal hidden></div>
   <div class="floating-panel" data-move-items-modal hidden></div>
   <div class="floating-panel" data-attachment-editor-modal hidden></div>
+  <div class="floating-panel" data-reader-pdf-picker-modal hidden></div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

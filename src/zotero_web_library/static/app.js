@@ -105,6 +105,10 @@ const state = {
   selectedAttachmentKeys: new Set(),
   editingAttachmentKey: "",
   editingAttachmentTitle: "",
+  readerPdfPickerItemKey: "",
+  readerPdfPickerAttachments: [],
+  readerPdfPickerSelectedKey: "",
+  readerPdfPickerMessage: "",
   activeCollectionMenuKey: "",
   editingCollectionKey: "",
   editingCollectionName: "",
@@ -234,19 +238,76 @@ function selectedItemKeys() {
   return [...state.selectedItemKeys].filter(Boolean);
 }
 
+function currentDetailItem() {
+  return state.selectedItem || null;
+}
+
+function currentItemPdfAttachments(item = currentDetailItem()) {
+  return (item?.attachments || []).filter((attachment) => {
+    const kind = String(attachment.kind || "").toLowerCase();
+    const type = String(attachment.content_type || "").toLowerCase();
+    const label = String(attachment.display_label || attachment.path || "").toLowerCase();
+    return attachment.openable && (kind === "pdf" || type.includes("pdf") || label.endsWith(".pdf"));
+  });
+}
+
+function bulkActionState(action) {
+  const checkedCount = selectedItemKeys().length;
+  const item = currentDetailItem();
+  const editable = Boolean(state.library?.editable);
+  const pdfCount = currentItemPdfAttachments(item).length;
+  const checkedRequired = "请勾选任意数量条目后操作";
+  const localCopyRequired = "只读源库不能执行此操作，请先创建本地副本";
+  const pending = "功能待接入";
+  switch (action) {
+    case "add-item":
+      return editable ? { enabled: true, title: "添加条目" } : { enabled: false, title: localCopyRequired };
+    case "delete-items":
+      if (!editable) return { enabled: false, title: localCopyRequired };
+      return checkedCount ? { enabled: true, title: "删除已勾选条目" } : { enabled: false, title: checkedRequired };
+    case "move-items":
+      if (!editable) return { enabled: false, title: localCopyRequired };
+      return checkedCount ? { enabled: true, title: "移动已勾选条目" } : { enabled: false, title: checkedRequired };
+    case "edit-attachments":
+      if (!editable) return { enabled: false, title: localCopyRequired };
+      return item ? { enabled: true, title: "编辑当前条目的附件" } : { enabled: false, title: "请点击任意条目后操作" };
+    case "read-paper":
+      return item && pdfCount ? { enabled: true, title: "打开当前条目的 PDF" } : { enabled: false, title: "请点击有可读PDF的条目后操作" };
+    case "export-citation":
+      return checkedCount ? { enabled: true, title: "导出已勾选条目引用" } : { enabled: false, title: checkedRequired };
+    case "download-papers":
+    case "query-rank":
+    case "paper-matrix":
+    case "knowledge-qa":
+      return checkedCount ? { enabled: false, title: pending } : { enabled: false, title: checkedRequired };
+    default:
+      return { enabled: false, title: pending };
+  }
+}
+
+function renderBulkActionStates() {
+  document.querySelectorAll("[data-bulk-action]").forEach((button) => {
+    const status = bulkActionState(button.dataset.bulkAction);
+    button.classList.toggle("is-disabled", !status.enabled);
+    button.setAttribute("aria-disabled", status.enabled ? "false" : "true");
+    button.title = status.title || "";
+  });
+}
+
 function notifyFeatureInProgress(action) {
   const labels = new Map([
     ["add-item", "添加条目"],
     ["delete-items", "删除条目"],
     ["move-items", "移动条目"],
     ["edit-attachments", "附件编辑"],
+    ["read-paper", "文献研读"],
     ["download-papers", "文献下载"],
     ["query-rank", "期刊&会议等级查询"],
     ["export-citation", "引用导出"],
     ["paper-matrix", "文献矩阵"],
     ["knowledge-qa", "知识库问答"],
   ]);
-  window.alert(`${labels.get(action) || "该功能"}开发中`);
+  console.info(`${labels.get(action) || "该功能"}开发中`);
 }
 
 function currentRealCollectionKey() {
@@ -457,10 +518,7 @@ function renderCitationExportModal() {
 }
 
 function openCitationExportModal() {
-  if (!selectedItemKeys().length) {
-    window.alert("请先勾选要导出的条目。");
-    return;
-  }
+  if (!bulkActionState("export-citation").enabled) return;
   state.citationExportMessage = "";
   document.querySelector("[data-export-citation-modal]").hidden = false;
   renderCitationExportModal();
@@ -564,14 +622,7 @@ function renderDeleteItemsModal() {
 }
 
 function openDeleteItemsModal() {
-  if (!selectedItemKeys().length) {
-    window.alert("请先勾选要删除的条目。");
-    return;
-  }
-  if (!state.library?.editable) {
-    window.alert("只读源库不能删除条目。请先创建本地副本。");
-    return;
-  }
+  if (!bulkActionState("delete-items").enabled) return;
   state.deleteItemsMode = "trash";
   state.deleteItemsMessage = "";
   state.deleteItemsPermanentConfirmed = false;
@@ -644,14 +695,7 @@ function renderMoveItemsModal() {
 }
 
 function openMoveItemsModal() {
-  if (!selectedItemKeys().length) {
-    window.alert("请先勾选要移动的条目。");
-    return;
-  }
-  if (!state.library?.editable) {
-    window.alert("只读源库不能移动条目。请先创建本地副本。");
-    return;
-  }
+  if (!bulkActionState("move-items").enabled) return;
   state.moveItemsTargetKey = currentRealCollectionKey() || sortedCollections()[0]?.key || "";
   state.moveItemsMessage = "";
   document.querySelector("[data-move-items-modal]").hidden = false;
@@ -783,16 +827,10 @@ function renderAttachmentEditorModal() {
 }
 
 function openAttachmentEditorModal() {
-  const keys = selectedItemKeys();
-  if (keys.length !== 1) {
-    window.alert("附件编辑仅支持勾选一个条目。");
-    return;
-  }
-  if (!state.library?.editable) {
-    window.alert("只读源库不能编辑附件。请先创建本地副本。");
-    return;
-  }
-  state.attachmentEditorItemKey = keys[0];
+  if (!bulkActionState("edit-attachments").enabled) return;
+  const item = currentDetailItem();
+  if (!item?.key) return;
+  state.attachmentEditorItemKey = item.key;
   state.attachmentEditorMessage = "";
   state.selectedAttachmentKeys = new Set();
   state.editingAttachmentKey = "";
@@ -899,6 +937,96 @@ async function submitUrlAttachment(event) {
   } finally {
     state.attachmentEditorBusy = false;
     renderAttachmentEditorModal();
+  }
+}
+
+function readerUrl(itemKey, attachmentKey) {
+  const params = new URLSearchParams({ item_key: itemKey, attachment_key: attachmentKey });
+  return `/library/${state.libraryId}/reader?${params.toString()}`;
+}
+
+function closeReaderPdfPickerModal() {
+  const panel = document.querySelector("[data-reader-pdf-picker-modal]");
+  if (panel) panel.hidden = true;
+}
+
+function renderReaderPdfPickerModal() {
+  const panel = document.querySelector("[data-reader-pdf-picker-modal]");
+  if (!panel) return;
+  const item = state.items.find((value) => value.key === state.readerPdfPickerItemKey);
+  const attachments = state.readerPdfPickerAttachments || [];
+  panel.innerHTML = `
+    <section class="floating-card reader-picker-card" data-reader-pdf-picker>
+      <div class="pane-head">
+        <div>
+          <h2>选择 PDF</h2>
+          <p>${escapeHtml(item?.title || state.readerPdfPickerItemKey)} · ${attachments.length} 个可打开 PDF</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-reader-pdf-picker>×</button>
+      </div>
+      <form class="bulk-modal-form" data-reader-pdf-picker-form>
+        <div class="reader-picker-list">
+          ${attachments.map((attachment, index) => {
+            const checked = (state.readerPdfPickerSelectedKey || attachments[0]?.key) === attachment.key;
+            return `
+              <label class="choice-row reader-picker-option">
+                <input type="radio" name="attachment_key" value="${escapeHtml(attachment.key)}" ${checked ? "checked" : ""}>
+                <span>
+                  <strong>${escapeHtml(attachment.display_label || attachment.path || `PDF ${index + 1}`)}</strong>
+                  <small>${escapeHtml(attachment.path || attachment.content_type || attachment.key)}</small>
+                </span>
+              </label>
+            `;
+          }).join("")}
+        </div>
+        ${state.readerPdfPickerMessage ? `<p class="import-message">${escapeHtml(state.readerPdfPickerMessage)}</p>` : ""}
+        <div class="bulk-modal-actions">
+          <button type="button" class="ghost-btn" data-close-reader-pdf-picker>取消</button>
+          <button type="submit" class="form-action-btn">进入研读</button>
+        </div>
+      </form>
+    </section>
+  `;
+  panel.querySelectorAll("[data-close-reader-pdf-picker]").forEach((button) => button.addEventListener("click", closeReaderPdfPickerModal));
+  panel.querySelector("[data-reader-pdf-picker-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const attachmentKey = String(new FormData(event.currentTarget).get("attachment_key") || "").trim();
+    if (!attachmentKey) {
+      state.readerPdfPickerMessage = "请选择一个 PDF。";
+      renderReaderPdfPickerModal();
+      return;
+    }
+    window.location.href = readerUrl(state.readerPdfPickerItemKey, attachmentKey);
+  });
+}
+
+async function openReadPaper() {
+  if (!bulkActionState("read-paper").enabled) return;
+  const item = currentDetailItem();
+  if (!item?.key) return;
+  const itemKey = item.key;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/items/${itemKey}/pdf-attachments`);
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(data.error || "读取 PDF 附件失败");
+    const attachments = data.attachments || [];
+    if (!attachments.length) return;
+    if (attachments.length === 1) {
+      window.location.href = readerUrl(itemKey, attachments[0].key);
+      return;
+    }
+    state.readerPdfPickerItemKey = itemKey;
+    state.readerPdfPickerAttachments = attachments;
+    state.readerPdfPickerSelectedKey = attachments[0].key;
+    state.readerPdfPickerMessage = "";
+    document.querySelector("[data-reader-pdf-picker-modal]").hidden = false;
+    renderReaderPdfPickerModal();
+  } catch (error) {
+    state.readerPdfPickerItemKey = itemKey;
+    state.readerPdfPickerAttachments = [];
+    state.readerPdfPickerMessage = error.message || "打开文献研读失败。";
+    document.querySelector("[data-reader-pdf-picker-modal]").hidden = false;
+    renderReaderPdfPickerModal();
   }
 }
 
@@ -1502,6 +1630,7 @@ function renderTable() {
   document.querySelector("[data-visible-count]").textContent = String(state.filteredItems.length);
   document.querySelector("[data-total-count]").textContent = String(state.items.length);
   document.querySelector("[data-selected-count]").textContent = String(totalSelectedCount());
+  renderBulkActionStates();
 }
 
 function setupColumnResize() {
@@ -1830,8 +1959,8 @@ function renderColumnPanel() {
     <label class="column-row">
       <input type="checkbox" data-column-check value="${key}" ${active.has(key) ? "checked" : ""}>
       <span>${labels.get(key) || key}</span>
-      <button type="button" data-col-up="${index}">↑</button>
-      <button type="button" data-col-down="${index}">↓</button>
+      <button class="column-order-btn" type="button" data-col-up="${index}" title="上移">↑</button>
+      <button class="column-order-btn" type="button" data-col-down="${index}" title="下移">↓</button>
     </label>
   `).join("");
   function move(index, delta) {
@@ -1896,12 +2025,15 @@ function setupLibraryPage() {
     applyFilters();
   });
   document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
-    if (button.dataset.bulkAction === "add-item") openAddItemModal();
-    else if (button.dataset.bulkAction === "delete-items") openDeleteItemsModal();
-    else if (button.dataset.bulkAction === "move-items") openMoveItemsModal();
-    else if (button.dataset.bulkAction === "edit-attachments") openAttachmentEditorModal();
-    else if (button.dataset.bulkAction === "export-citation") openCitationExportModal();
-    else notifyFeatureInProgress(button.dataset.bulkAction);
+    const action = button.dataset.bulkAction;
+    if (!bulkActionState(action).enabled) return;
+    if (action === "add-item") openAddItemModal();
+    else if (action === "delete-items") openDeleteItemsModal();
+    else if (action === "move-items") openMoveItemsModal();
+    else if (action === "edit-attachments") openAttachmentEditorModal();
+    else if (action === "read-paper") openReadPaper();
+    else if (action === "export-citation") openCitationExportModal();
+    else notifyFeatureInProgress(action);
   }));
   setupColumnsPanel();
   loadState().catch((error) => window.alert(error.message));

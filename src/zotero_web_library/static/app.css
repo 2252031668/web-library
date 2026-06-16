@@ -343,6 +343,22 @@ button, input, select {
   color: #1d4ed8;
 }
 
+.bulk-action-btn.is-disabled,
+.bulk-action-btn[aria-disabled="true"] {
+  background: #e5e7eb;
+  border-color: #d1d5db;
+  color: #94a3b8;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.bulk-action-btn.is-disabled:hover,
+.bulk-action-btn[aria-disabled="true"]:hover {
+  background: #e5e7eb;
+  border-color: #d1d5db;
+  color: #94a3b8;
+}
+
 .toolbar-actions input, .tag-search {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1012,6 +1028,23 @@ button, input, select {
   width: min(780px, calc(100vw - 34px));
 }
 
+.reader-picker-card {
+  width: min(640px, calc(100vw - 34px));
+}
+
+.reader-picker-list {
+  display: grid;
+  gap: 8px;
+  max-height: 44vh;
+  overflow: auto;
+}
+
+.reader-picker-option strong,
+.reader-picker-option small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .attachment-editor-list {
   display: grid;
   gap: 8px;
@@ -1292,6 +1325,31 @@ button, input, select {
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.nav-action-btn {
+  align-items: center;
+  background: var(--text);
+  border: 1px solid var(--text);
+  border-radius: 14px;
+  color: white;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 850;
+  height: 40px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 104px;
+  padding: 0 16px;
+  text-decoration: none;
+}
+
+.nav-action-btn:hover {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: white;
+  text-decoration: none;
 }
 
 .structured-detail-form textarea {
@@ -1647,6 +1705,33 @@ button, input, select {
   align-items: center;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
+}
+
+.column-save-btn {
+  margin-top: 12px;
+}
+
+.column-order-btn {
+  align-items: center;
+  background: #f8fbfd;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 15px;
+  font-weight: 900;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 32px;
+}
+
+.column-order-btn:hover {
+  background: var(--text);
+  border-color: var(--text);
+  color: white;
 }
 
 .icon-btn {

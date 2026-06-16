@@ -446,6 +446,7 @@ def test_permanent_delete_items_removes_records_and_attachment_storage(
       for table in ["items", "itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems", "itemAttachments", "itemNotes"]:
           row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE itemID IN (1, 2, 3, 4, 5, 6)").fetchone()
           assert row["count"] == 0
+      assert conn.execute("SELECT COUNT(*) AS count FROM itemAnnotations WHERE itemID = 14 OR parentItemID = 2").fetchone()["count"] == 0
 
 
 def test_move_items_replaces_existing_collection_memberships(
@@ -553,6 +554,132 @@ def test_file_attachment_add_rename_and_delete_updates_storage(
     assert not storage_dir.exists()
     item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
     assert attachment_key not in {attachment["key"] for attachment in item["attachments"]}
+
+
+def test_pdf_annotation_read_and_create_use_zotero_native_table(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    existing = repo.annotations_for_attachment("ATTACH01")
+    assert existing[0]["key"] == "ANNOT001"
+    assert existing[0]["type"] == "highlight"
+    assert existing[0]["position"]["rects"] == [[10, 20, 30, 40]]
+
+    highlight = repo.create_pdf_annotation(
+        "ATTACH01",
+        {"type": "highlight", "text": "new highlight", "color": "#ffd400", "page_index": 0, "page_label": "1", "rects": [[1, 2, 3, 4]]},
+    )
+    underline = repo.create_pdf_annotation(
+        "ATTACH01",
+        {"type": "underline", "text": "new underline", "color": "#2ea8e5", "page_index": 0, "page_label": "1", "rects": [[5, 6, 7, 8]]},
+    )
+    positioned = repo.create_pdf_annotation(
+        "ATTACH01",
+        {
+            "type": "highlight",
+            "text": "position object",
+            "color": "#ffd400",
+            "position": {"pageIndex": 1, "rects": [[9.11119, 10.22229, 11.33339, 12.44449]]},
+        },
+    )
+
+    assert highlight["type_id"] == 1
+    assert underline["type_id"] == 5
+    assert positioned["position"] == {"pageIndex": 1, "rects": [[9.111, 10.222, 11.333, 12.444]]}
+    with sqlite3.connect(Path(library["data_path"]) / "zotero.sqlite") as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT ia.type, ia.text, ia.position
+            FROM itemAnnotations ia
+            JOIN items i ON i.itemID = ia.itemID
+            WHERE i.key IN (?, ?)
+            ORDER BY ia.type
+            """,
+            (highlight["key"], underline["key"]),
+        ).fetchall()
+    assert [row["type"] for row in rows] == [1, 5]
+    assert rows[0]["text"] == "new highlight"
+    assert '"pageIndex":0' in rows[0]["position"]
+
+
+def test_pdf_annotation_rejects_non_pdf_and_read_only(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    local_library = create_local_copy(zotero_fixture)
+    with pytest.raises(ValueError, match="仅支持 PDF"):
+        ZoteroRepository(local_library).create_pdf_annotation(
+            "HTML01",
+            {"type": "highlight", "page_index": 0, "rects": [[1, 2, 3, 4]]},
+        )
+
+    readonly_library = create_read_only_source(zotero_fixture)
+    with pytest.raises(SourceError):
+        ZoteroRepository(readonly_library).create_pdf_annotation(
+            "ATTACH01",
+            {"type": "highlight", "page_index": 0, "rects": [[1, 2, 3, 4]]},
+        )
+
+
+def test_clear_pdf_annotations_deletes_intersecting_saved_styles_only(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+    matching = repo.create_pdf_annotation(
+        "ATTACH01",
+        {"type": "highlight", "text": "delete me", "page_index": 0, "rects": [[1, 2, 5, 6]]},
+    )
+    same_page_other_area = repo.create_pdf_annotation(
+        "ATTACH01",
+        {"type": "underline", "text": "keep me", "page_index": 0, "rects": [[50, 60, 70, 80]]},
+    )
+    other_page = repo.create_pdf_annotation(
+        "ATTACH01",
+        {"type": "highlight", "text": "keep page", "position": {"pageIndex": 1, "rects": [[1, 2, 5, 6]]}},
+    )
+
+    result = repo.clear_pdf_annotations("ATTACH01", {"position": {"pageIndex": 0, "rects": [[4, 5, 7, 8]]}})
+
+    assert result["deleted_count"] == 1
+    assert result["annotation_keys"] == [matching["key"]]
+    remaining_keys = {annotation["key"] for annotation in repo.annotations_for_attachment("ATTACH01")}
+    assert matching["key"] not in remaining_keys
+    assert same_page_other_area["key"] in remaining_keys
+    assert other_page["key"] in remaining_keys
+
+
+def test_clear_pdf_annotations_rejects_read_only_source(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    readonly_library = create_read_only_source(zotero_fixture)
+    with pytest.raises(SourceError):
+        ZoteroRepository(readonly_library).clear_pdf_annotations(
+            "ATTACH01",
+            {"position": {"pageIndex": 0, "rects": [[1, 2, 3, 4]]}},
+        )
+
+
+def test_deleting_attachment_removes_child_annotations(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    result = repo.delete_attachments(["ATTACH01"])
+
+    assert result["deleted_count"] == 1
+    with sqlite3.connect(Path(library["data_path"]) / "zotero.sqlite") as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("SELECT COUNT(*) AS count FROM items WHERE key = 'ANNOT001'").fetchone()["count"] == 0
+        assert conn.execute("SELECT COUNT(*) AS count FROM itemAnnotations WHERE itemID = 14 OR parentItemID = 2").fetchone()["count"] == 0
 
 
 def test_url_attachment_add_and_rename_does_not_create_storage(

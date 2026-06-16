@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ library.name }} - 文献研读</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+</head>
+<body data-reader-page data-library-id="{{ library.library_id }}">
+  <aside class="rail">
+    <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
+    <a class="rail-btn" title="文库" href="{{ url_for('library_page', library_id=library.library_id) }}">库</a>
+    <a class="rail-btn active" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
+    <button class="rail-btn" title="设置" data-reader-settings>设</button>
+  </aside>
+  <main class="reader-shell">
+    <header class="reader-topbar">
+      <div class="reader-title-block">
+        <h1 data-reader-title>文献研读</h1>
+        <div class="reader-subtitle-row">
+          <p data-reader-subtitle>请选择一篇 PDF 文献开始阅读。</p>
+        </div>
+      </div>
+      <div class="reader-toolbar" data-reader-toolbar>
+        <button type="button" class="reader-tool-btn" data-reader-zoom-out title="缩小">−</button>
+        <button type="button" class="reader-zoom-label" data-reader-fit-width title="适合宽度">
+          <span data-reader-zoom-label>100%</span>
+        </button>
+        <button type="button" class="reader-tool-btn" data-reader-zoom-in title="放大">+</button>
+        <span class="reader-toolbar-separator"></span>
+        <input class="reader-page-input" data-reader-page-input value="1" inputmode="numeric" aria-label="当前页码">
+        <span class="reader-page-total">/ <span data-reader-page-total>0</span></span>
+      </div>
+      <div class="reader-return-action">
+        <a class="nav-action-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">返回文库</a>
+      </div>
+    </header>
+    <section class="reader-layout" data-reader-layout>
+      <aside class="reader-outline" data-reader-outline-panel>
+        <div class="reader-panel-head reader-outline-head">
+          <h2>目录</h2>
+          <button type="button" class="reader-outline-collapse-btn" data-toggle-reader-outline title="折叠目录" aria-label="折叠目录">◀</button>
+        </div>
+        <nav class="reader-outline-tree" data-reader-outline></nav>
+      </aside>
+      <div class="reader-splitter" data-reader-splitter="left" title="拖拽调整宽度"></div>
+      <section class="reader-pdf-panel">
+        <div class="reader-empty" data-reader-empty>从文库中勾选一篇带 PDF 的条目，点击“文献研读”打开。</div>
+        <div class="reader-pdf-scroll" data-reader-pdf-scroll hidden>
+          <div class="reader-pdf-pages" data-reader-pdf-pages></div>
+        </div>
+        <div class="reader-annotation-toolbar" data-reader-annotation-toolbar hidden>
+          <button type="button" class="reader-color active" data-reader-color="#ffd400" style="--reader-color:#ffd400" title="黄色"></button>
+          <button type="button" class="reader-color" data-reader-color="#2ea8e5" style="--reader-color:#2ea8e5" title="蓝色"></button>
+          <button type="button" class="reader-color" data-reader-color="#ff6666" style="--reader-color:#ff6666" title="红色"></button>
+          <button type="button" class="reader-mark-btn" data-create-annotation="highlight">高亮</button>
+          <button type="button" class="reader-mark-btn" data-create-annotation="underline">下划线</button>
+          <button type="button" class="reader-mark-btn reader-clear-btn" data-clear-annotation>取消样式</button>
+        </div>
+      </section>
+      <div class="reader-splitter" data-reader-splitter="right" title="拖拽调整宽度"></div>
+      <aside class="reader-agent">
+        <div class="reader-panel-head">
+          <h2>智能体对话</h2>
+        </div>
+        <div class="reader-agent-placeholder">
+          <strong>下一版接入</strong>
+          <p>这里将用于围绕当前 PDF、标注和选中文本进行智能问答。</p>
+        </div>
+      </aside>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='vendor/pdfjs/pdf.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='reader.js') }}"></script>
+</body>
+</html>

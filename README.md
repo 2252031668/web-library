@@ -25,6 +25,8 @@
 - 支持在表格单元格内直接编辑结构化字段，也支持在详情区统一编辑。
 - 支持 PDF、HTML、笔记、图片、链接等附件徽标展示。
 - 支持附件编辑 v1：单条目上传本地文件、添加网页链接、重命名附件、删除附件。
+- 支持文献研读 v1：打开单篇文献 PDF，显示 PDF 内置目录、连续滚动页面、左右可调三栏布局。
+- 支持 Zotero 原生 PDF 标注 v1：文本选择后保存高亮和下划线到 `itemAnnotations`，不修改 PDF 文件本体。
 - 详情区笔记支持摘要折叠与展开。
 - 支持添加条目 v1：
   - 按 DOI、PMID、arXiv ID、ADS Bibcode、ISBN 等标识符导入。
@@ -48,6 +50,7 @@
 - “添加条目”按钮已接入标识符导入和引用文本导入弹窗，Import translator 路线说明见 `docs/zotero-translators.md`。
 - “引用导出”按钮已接入格式文件下载，参考 Zotero Export translators 的常用字段映射。
 - “附件编辑”按钮已接入单条目附件管理；网页链接附件 v1 只保存链接，不抓取网页快照。
+- “文献研读”按钮已接入单条目 PDF 阅读；右侧智能体对话面板是下一版占位。
 - 弹窗、文件夹行内编辑、附件编辑等表单按钮已统一尺寸和视觉样式。
 
 ## 数据源模式
@@ -72,6 +75,7 @@ C:\Users\<你自己的用户名>\Zotero
 
 - Zotero 原生 `zotero.sqlite` 是文献信息的唯一真实来源。
 - `#标签`、评分、阅读状态、期刊/会议等级都来自 Zotero 原生 `tags.name`。
+- PDF 高亮和下划线来自 Zotero 原生 `itemAnnotations`，写回时创建 annotation item，不写入 PDF 文件。
 - 不新增 Zotero 原生表或字段，不修改 Zotero 原生 schema。
 - 应用自己的元数据，例如快捷标签、列设置、界面偏好等，存放在 `app-data/app.sqlite`。
 
@@ -85,6 +89,7 @@ Zotero translators 的调查、可复用边界和添加条目 v1 路线见：
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
+- PDF 阅读器使用本地 vendored PDF.js `3.11.174`，文件位于 `src/zotero_web_library/static/vendor/pdfjs/`。
 
 仓库中的 `.python-version` 已固定为 `3.12`。
 

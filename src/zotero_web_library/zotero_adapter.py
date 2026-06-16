@@ -4,6 +4,7 @@ import sqlite3
 import shutil
 import mimetypes
 import re
+import json
 from contextlib import closing
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -24,6 +25,9 @@ from .semantic_tags import first_value, normalize_hash_tag, parse_tags, rating_t
 from .structured_text import extract_structured_fields, source_field_for_block, upsert_block
 from .sources import ensure_editable, sqlite_path_for, storage_path_for
 from .utils import new_key, now_iso
+
+
+ANNOTATION_TYPES = {"highlight": 1, "underline": 5}
 
 
 def connect_zotero(db_path: Path, *, read_only: bool = True) -> sqlite3.Connection:
@@ -75,6 +79,10 @@ class ZoteroRepository:
 
     def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+    def _has_table(self, conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
+        return row is not None
 
     def _ensure_tag(self, conn: sqlite3.Connection, tag: str) -> int:
         tag_row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (tag,)).fetchone()
@@ -298,6 +306,25 @@ class ZoteroRepository:
                 }
             )
         return attachments
+
+    def _attachment_dict_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        path = row["path"] or ""
+        resolved = self.resolve_attachment_path(row["key"], path)
+        kind = self.attachment_kind(path, row["contentType"] or "", row["linkMode"])
+        exists = bool(resolved and Path(resolved).exists())
+        status = "openable" if exists else ("external" if kind in {"link", "external"} else "missing")
+        return {
+            "item_id": row["itemID"],
+            "key": row["key"],
+            "path": path,
+            "display_label": self.attachment_label(path, row["title"] or ""),
+            "resolved_path": str(resolved) if resolved else "",
+            "content_type": row["contentType"] or "",
+            "link_mode": row["linkMode"],
+            "kind": kind,
+            "status": status,
+            "openable": exists,
+        }
 
     def _notes_by_parent(self, conn: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:
         if "itemNotes" not in self.schema_tables():
@@ -562,6 +589,219 @@ class ZoteroRepository:
             raise ValueError("附件不存在。")
         return row
 
+    def _pdf_attachment_row_for_key(self, conn: sqlite3.Connection, attachment_key: str) -> sqlite3.Row:
+        row = self._attachment_row_for_key(conn, attachment_key)
+        if self.attachment_kind(row["path"] or "", row["contentType"] or "", row["linkMode"]) != "pdf":
+            raise ValueError("研读功能仅支持 PDF 附件。")
+        resolved = self.resolve_attachment_path(row["key"], row["path"] or "")
+        if not resolved or not Path(resolved).exists():
+            raise ValueError("PDF 附件文件缺失。")
+        return row
+
+    def pdf_attachments_for_item(self, item_key: str) -> list[dict[str, Any]]:
+        with self.read_conn() as conn:
+            parent_item_id = self._main_item_id_for_key(conn, item_key)
+            rows = conn.execute(
+                """
+                SELECT a.parentItemID, a.itemID, a.path, a.contentType, a.linkMode, i.key, i.dateAdded, v.value AS title
+                FROM itemAttachments a
+                JOIN items i ON i.itemID = a.itemID
+                LEFT JOIN itemData d ON d.itemID = i.itemID AND d.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
+                LEFT JOIN itemDataValues v ON v.valueID = d.valueID
+                WHERE a.parentItemID = ?
+                ORDER BY i.dateAdded
+                """,
+                (parent_item_id,),
+            ).fetchall()
+        return [
+            attachment
+            for attachment in (self._attachment_dict_from_row(row) for row in rows)
+            if attachment["kind"] == "pdf" and attachment["openable"]
+        ]
+
+    def annotations_for_attachment(self, attachment_key: str) -> list[dict[str, Any]]:
+        with self.read_conn() as conn:
+            row = self._pdf_attachment_row_for_key(conn, attachment_key)
+            if not self._has_table(conn, "itemAnnotations"):
+                return []
+            rows = conn.execute(
+                """
+                SELECT i.key, ia.itemID, ia.parentItemID, ia.type, ia.authorName, ia.text, ia.comment, ia.color, ia.pageLabel, ia.sortIndex, ia.position, ia.isExternal
+                FROM itemAnnotations ia
+                JOIN items i ON i.itemID = ia.itemID
+                WHERE ia.parentItemID = ? AND ia.type IN (1, 5)
+                ORDER BY ia.sortIndex
+                """,
+                (row["itemID"],),
+            ).fetchall()
+        annotations: list[dict[str, Any]] = []
+        for annotation in rows:
+            position_text = annotation["position"] or "{}"
+            try:
+                position = json.loads(position_text)
+            except json.JSONDecodeError:
+                position = {}
+            annotations.append(
+                {
+                    "key": annotation["key"],
+                    "item_id": annotation["itemID"],
+                    "attachment_key": attachment_key,
+                    "type": "underline" if int(annotation["type"]) == ANNOTATION_TYPES["underline"] else "highlight",
+                    "type_id": int(annotation["type"]),
+                    "text": annotation["text"] or "",
+                    "comment": annotation["comment"] or "",
+                    "color": annotation["color"] or "#ffd400",
+                    "page_label": annotation["pageLabel"] or "",
+                    "sort_index": annotation["sortIndex"] or "",
+                    "position": position,
+                    "is_external": bool(annotation["isExternal"]),
+                }
+            )
+        return annotations
+
+    def create_pdf_annotation(self, attachment_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        ensure_editable(self.library)
+        annotation_type = str(payload.get("type") or "highlight").strip()
+        if annotation_type not in ANNOTATION_TYPES:
+            raise ValueError("未知标注类型。")
+        text = str(payload.get("text") or "").strip()
+        color = str(payload.get("color") or "#ffd400").strip() or "#ffd400"
+        payload_position = payload.get("position") if isinstance(payload.get("position"), dict) else None
+        page_index = int((payload_position or {}).get("pageIndex", payload.get("page_index") or 0))
+        page_label = str(payload.get("page_label") or page_index + 1)
+        rects = (payload_position or {}).get("rects", payload.get("rects"))
+        if not isinstance(rects, list) or not rects:
+            raise ValueError("标注位置不能为空。")
+        normalized_rects: list[list[float]] = []
+        for rect in rects:
+            if not isinstance(rect, list) or len(rect) != 4:
+                raise ValueError("标注矩形格式错误。")
+            normalized_rects.append([round(float(value), 3) for value in rect])
+        position = {**(payload_position or {}), "pageIndex": page_index, "rects": normalized_rects}
+        first_rect = normalized_rects[0]
+        sort_index = f"{page_index:05d}|{int(min(first_rect[1], first_rect[3]) * 1000):06d}|{int(min(first_rect[0], first_rect[2]) * 1000):05d}"
+        annotation_key = new_key()
+        timestamp = now_iso()
+        with self.write_conn() as conn:
+            if not self._has_table(conn, "itemAnnotations"):
+                raise ValueError("当前 Zotero 数据库没有 itemAnnotations 表，无法保存 PDF 标注。")
+            attachment = self._pdf_attachment_row_for_key(conn, attachment_key)
+            annotation_item_id = self._insert_item(conn, "annotation", annotation_key, timestamp)
+            conn.execute(
+                """
+                INSERT INTO itemAnnotations (itemID, parentItemID, type, authorName, text, comment, color, pageLabel, sortIndex, position, isExternal)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    annotation_item_id,
+                    attachment["itemID"],
+                    ANNOTATION_TYPES[annotation_type],
+                    None,
+                    text or None,
+                    str(payload.get("comment") or "").strip() or None,
+                    color,
+                    page_label,
+                    sort_index,
+                    json.dumps(position, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+            conn.execute("UPDATE items SET dateModified = ?, synced = 0 WHERE itemID IN (?, ?)", (timestamp, annotation_item_id, attachment["itemID"]))
+            conn.commit()
+        app_store.append_journal(
+            self.library["library_id"],
+            "create_pdf_annotation",
+            "annotation",
+            annotation_key,
+            {"attachment_key": attachment_key, "type": annotation_type, "page_index": page_index},
+        )
+        return {
+            "key": annotation_key,
+            "attachment_key": attachment_key,
+            "type": annotation_type,
+            "type_id": ANNOTATION_TYPES[annotation_type],
+            "text": text,
+            "color": color,
+            "page_label": page_label,
+            "sort_index": sort_index,
+            "position": position,
+            "is_external": False,
+        }
+
+    def clear_pdf_annotations(self, attachment_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        ensure_editable(self.library)
+        payload_position = payload.get("position") if isinstance(payload.get("position"), dict) else payload
+        page_index = int(payload_position.get("pageIndex", payload.get("page_index", 0)))
+        rects = payload_position.get("rects", payload.get("rects"))
+        if not isinstance(rects, list) or not rects:
+            raise ValueError("请选择要清除样式的区域。")
+        target_rects = self._normalize_pdf_rects(rects)
+        timestamp = now_iso()
+        deleted_keys: list[str] = []
+        with self.write_conn() as conn:
+            attachment = self._pdf_attachment_row_for_key(conn, attachment_key)
+            if not self._has_table(conn, "itemAnnotations"):
+                return {"deleted_count": 0, "annotation_keys": []}
+            rows = conn.execute(
+                """
+                SELECT i.key, ia.itemID, ia.position
+                FROM itemAnnotations ia
+                JOIN items i ON i.itemID = ia.itemID
+                WHERE ia.parentItemID = ? AND ia.type IN (1, 5)
+                """,
+                (attachment["itemID"],),
+            ).fetchall()
+            delete_item_ids: list[int] = []
+            for row in rows:
+                try:
+                    position = json.loads(row["position"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if int(position.get("pageIndex", -1)) != page_index:
+                    continue
+                try:
+                    annotation_rects = self._normalize_pdf_rects(position.get("rects") or [])
+                except (TypeError, ValueError):
+                    continue
+                if any(self._pdf_rects_intersect(target_rect, annotation_rect) for target_rect in target_rects for annotation_rect in annotation_rects):
+                    delete_item_ids.append(int(row["itemID"]))
+                    deleted_keys.append(str(row["key"]))
+            if not delete_item_ids:
+                return {"deleted_count": 0, "annotation_keys": []}
+            placeholders = ", ".join("?" for _ in delete_item_ids)
+            for table in ("itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems", "itemAnnotations"):
+                if self._has_table(conn, table):
+                    conn.execute(f"DELETE FROM {table} WHERE itemID IN ({placeholders})", delete_item_ids)
+            conn.execute(f"DELETE FROM items WHERE itemID IN ({placeholders})", delete_item_ids)
+            conn.execute("UPDATE items SET dateModified = ?, synced = 0 WHERE itemID = ?", (timestamp, attachment["itemID"]))
+            conn.commit()
+        app_store.append_journal(
+            self.library["library_id"],
+            "clear_pdf_annotations",
+            "annotation",
+            ",".join(deleted_keys),
+            {"attachment_key": attachment_key, "page_index": page_index, "annotation_keys": deleted_keys},
+        )
+        return {"deleted_count": len(deleted_keys), "annotation_keys": deleted_keys}
+
+    @staticmethod
+    def _normalize_pdf_rects(rects: list[Any]) -> list[list[float]]:
+        normalized: list[list[float]] = []
+        for rect in rects:
+            if not isinstance(rect, list) or len(rect) != 4:
+                raise ValueError("标注矩形格式错误。")
+            values = [float(value) for value in rect]
+            normalized.append([
+                min(values[0], values[2]),
+                min(values[1], values[3]),
+                max(values[0], values[2]),
+                max(values[1], values[3]),
+            ])
+        return normalized
+
+    @staticmethod
+    def _pdf_rects_intersect(first: list[float], second: list[float]) -> bool:
+        return first[0] <= second[2] and first[2] >= second[0] and first[1] <= second[3] and first[3] >= second[1]
+
     def _unique_storage_filename(self, attachment_dir: Path, filename: str, current_name: str | None = None) -> str:
         safe_name = safe_attachment_filename(filename)
         if current_name and safe_name == current_name:
@@ -631,14 +871,15 @@ class ZoteroRepository:
         frontier = list(parent_item_ids)
         while frontier:
             placeholders = ", ".join("?" for _ in frontier)
-            rows = conn.execute(
-                f"""
-                SELECT itemID FROM itemAttachments WHERE parentItemID IN ({placeholders})
-                UNION
-                SELECT itemID FROM itemNotes WHERE parentItemID IN ({placeholders})
-                """,
-                [*frontier, *frontier],
-            ).fetchall()
+            queries: list[str] = []
+            params: list[int] = []
+            for table in ("itemAttachments", "itemNotes", "itemAnnotations"):
+                if self._has_table(conn, table):
+                    queries.append(f"SELECT itemID FROM {table} WHERE parentItemID IN ({placeholders})")
+                    params.extend(frontier)
+            if not queries:
+                break
+            rows = conn.execute("\nUNION\n".join(queries), params).fetchall()
             next_frontier = [int(row["itemID"]) for row in rows if int(row["itemID"]) not in seen]
             seen.update(next_frontier)
             frontier = next_frontier
@@ -913,12 +1154,19 @@ class ZoteroRepository:
             item_ids = [int(row["itemID"]) for row in rows]
             deleted_keys = [str(row["key"]) for row in rows]
             storage_dirs = self._attachment_storage_dirs_for_item_ids(conn, item_ids)
+            annotation_rows = []
+            if self._has_table(conn, "itemAnnotations"):
+                placeholders = ", ".join("?" for _ in item_ids)
+                annotation_rows = conn.execute(f"SELECT itemID FROM itemAnnotations WHERE parentItemID IN ({placeholders})", item_ids).fetchall()
+            annotation_item_ids = [int(row["itemID"]) for row in annotation_rows]
+            all_item_ids = [*item_ids, *annotation_item_ids]
             placeholders = ", ".join("?" for _ in item_ids)
-            for table in ("itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems"):
-                if table in self.schema_tables():
-                    conn.execute(f"DELETE FROM {table} WHERE itemID IN ({placeholders})", item_ids)
+            all_placeholders = ", ".join("?" for _ in all_item_ids)
+            for table in ("itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems", "itemAnnotations"):
+                if self._has_table(conn, table):
+                    conn.execute(f"DELETE FROM {table} WHERE itemID IN ({all_placeholders})", all_item_ids)
             conn.execute(f"DELETE FROM itemAttachments WHERE itemID IN ({placeholders})", item_ids)
-            conn.execute(f"DELETE FROM items WHERE itemID IN ({placeholders})", item_ids)
+            conn.execute(f"DELETE FROM items WHERE itemID IN ({all_placeholders})", all_item_ids)
             parent_ids = sorted({int(row["parentItemID"]) for row in rows if row["parentItemID"]})
             if parent_ids:
                 parent_placeholders = ", ".join("?" for _ in parent_ids)
@@ -1048,12 +1296,12 @@ class ZoteroRepository:
                 storage_dirs = self._attachment_storage_dirs_for_item_ids(conn, child_ids)
                 all_item_ids = [*item_ids, *child_ids]
                 all_placeholders = ", ".join("?" for _ in all_item_ids)
-                for table in ("itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems"):
-                    if table in self.schema_tables():
+                for table in ("itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems", "itemAnnotations"):
+                    if self._has_table(conn, table):
                         conn.execute(f"DELETE FROM {table} WHERE itemID IN ({all_placeholders})", all_item_ids)
-                if "itemAttachments" in self.schema_tables():
+                if self._has_table(conn, "itemAttachments"):
                     conn.execute(f"DELETE FROM itemAttachments WHERE itemID IN ({all_placeholders}) OR parentItemID IN ({placeholders})", [*all_item_ids, *item_ids])
-                if "itemNotes" in self.schema_tables():
+                if self._has_table(conn, "itemNotes"):
                     conn.execute(f"DELETE FROM itemNotes WHERE itemID IN ({all_placeholders}) OR parentItemID IN ({placeholders})", [*all_item_ids, *item_ids])
                 conn.execute(f"DELETE FROM items WHERE itemID IN ({all_placeholders})", all_item_ids)
             conn.commit()

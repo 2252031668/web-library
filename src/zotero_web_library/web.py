@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import mimetypes
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file, send_from_directory
 
 from . import app_store
 from .citation_export import CitationExportError, export_citations, export_filename
@@ -16,8 +17,22 @@ from .zotero_adapter import ZoteroRepository
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, template_folder="templates", static_folder="static")
+    mimetypes.add_type("application/javascript", ".js")
+    mimetypes.add_type("application/javascript", ".mjs")
+    static_dir = Path(__file__).resolve().parent / "static"
+    app = Flask(__name__, template_folder="templates", static_folder=None)
     app_store.ensure_app_store()
+
+    @app.get("/static/<path:filename>", endpoint="static")
+    def static_files(filename: str):
+        mimetype = "application/javascript" if filename.endswith((".js", ".mjs")) else None
+        return send_from_directory(static_dir, filename, mimetype=mimetype)
+
+    @app.after_request
+    def fix_static_javascript_mimetype(response):
+        if request.path.startswith("/static/") and request.path.endswith((".js", ".mjs")):
+            response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+        return response
 
     def library_or_404(library_id: str) -> dict[str, Any]:
         library = app_store.get_library(library_id)
@@ -36,6 +51,12 @@ def create_app() -> Flask:
         library = library_or_404(library_id)
         libraries = app_store.list_libraries()
         return render_template("library.html", library=library, libraries=libraries)
+
+    @app.get("/library/<library_id>/reader")
+    def reader_page(library_id: str):
+        library = library_or_404(library_id)
+        libraries = app_store.list_libraries()
+        return render_template("reader.html", library=library, libraries=libraries)
 
     @app.post("/api/sources/read-only")
     def api_read_only_source():
@@ -300,6 +321,14 @@ def create_app() -> Flask:
         except (SourceError, ValueError, CitationExportError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/library/<library_id>/items/<item_key>/pdf-attachments")
+    def api_item_pdf_attachments(library_id: str, item_key: str):
+        try:
+            attachments = ZoteroRepository(library_or_404(library_id)).pdf_attachments_for_item(item_key)
+            return jsonify({"ok": True, "attachments": attachments})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.get("/api/library/<library_id>/semantic-rules")
     def api_semantic_rules(library_id: str):
         library_or_404(library_id)
@@ -397,6 +426,32 @@ def create_app() -> Flask:
         attachment_keys = [str(key) for key in keys] if isinstance(keys, list) else [attachment_key]
         try:
             result = ZoteroRepository(library_or_404(library_id)).delete_attachments(attachment_keys)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/attachments/<attachment_key>/annotations")
+    def api_attachment_annotations(library_id: str, attachment_key: str):
+        try:
+            annotations = ZoteroRepository(library_or_404(library_id)).annotations_for_attachment(attachment_key)
+            return jsonify({"ok": True, "annotations": annotations})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/attachments/<attachment_key>/annotations")
+    def api_create_attachment_annotation(library_id: str, attachment_key: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            annotation = ZoteroRepository(library_or_404(library_id)).create_pdf_annotation(attachment_key, payload)
+            return jsonify({"ok": True, "annotation": annotation})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/attachments/<attachment_key>/annotations/clear")
+    def api_clear_attachment_annotations(library_id: str, attachment_key: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).clear_pdf_annotations(attachment_key, payload)
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
