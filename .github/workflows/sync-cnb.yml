@@ -1,0 +1,35 @@
+name: Sync to CNB
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-cnb-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Sync to CNB
+        uses: docker://tencentcom/git-sync
+        env:
+          PLUGIN_TARGET_URL: https://cnb.cool/guangmingAIResearch/guangming_ai_workbench.git
+          PLUGIN_AUTH_TYPE: https
+          PLUGIN_USERNAME: ${{ secrets.CNB_USERNAME }}
+          PLUGIN_PASSWORD: ${{ secrets.CNB_TOKEN }}
+          PLUGIN_BRANCH: main
+          PLUGIN_SYNC_MODE: push
+          PLUGIN_FORCE: "true"

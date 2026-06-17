@@ -3,14 +3,14 @@ main:
     - services:
         - docker
       stages:
-        - name: git lfs pull
-          script: |
-            git lfs install
-            git lfs pull
-            if grep -q "git-lfs.github.com/spec" demo-data/app.sqlite; then
-              echo "demo-data/app.sqlite is still a Git LFS pointer. Please ensure Git LFS files are available before docker build."
-              exit 1
-            fi
+        # - name: git lfs pull
+        #   script: |
+        #     git lfs install
+        #     git lfs pull
+        #     if grep -q "git-lfs.github.com/spec" demo-data/app.sqlite; then
+        #       echo "demo-data/app.sqlite is still a Git LFS pointer. Please ensure Git LFS files are available before docker build."
+        #       exit 1
+        #     fi
         - name: docker build
           script: docker build -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
         - name: docker push
