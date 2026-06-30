@@ -66,6 +66,12 @@ const ITEM_TYPE_ALIASES = {
 const state = {
   libraryId: "",
   library: null,
+  apiConfig: null,
+  apiConfigBusy: false,
+  apiConfigMessage: "",
+  apiConfigShowSecrets: false,
+  apiConfigCheckResults: {},
+  apiConfigChecking: "",
   items: [],
   collections: [],
   tagShortcuts: [],
@@ -89,6 +95,89 @@ const state = {
   addItemMessage: "",
   addItemResults: [],
   addItemBusy: false,
+  retrievalQuery: "",
+  retrievalSources: new Set(["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "github", "huggingface", "zenodo"]),
+  retrievalCandidates: [],
+  retrievalSelectedKeys: new Set(),
+  retrievalStats: null,
+  retrievalAiEvaluationSummary: null,
+  retrievalRunId: "",
+  retrievalRuns: [],
+  retrievalRunsBusy: false,
+  retrievalRunsMessage: "",
+  retrievalSummary: null,
+  retrievalSummaryBusy: false,
+  retrievalSummaryMessage: "",
+  retrievalSourceInfo: {},
+  retrievalSourcesBusy: false,
+  retrievalSourcesChecking: false,
+  retrievalSourcesMessage: "",
+  retrievalModelStatus: null,
+  retrievalModelStatusBusy: false,
+  retrievalModelStatusMessage: "",
+  retrievalReadiness: null,
+  retrievalReadinessBusy: false,
+  retrievalReadinessMessage: "",
+  retrievalOnboarding: null,
+  retrievalOnboardingBusy: false,
+  retrievalOnboardingMessage: "",
+  retrievalConfigBundleText: "",
+  retrievalConfigBundleResult: null,
+  retrievalConfigBundleBusy: false,
+  retrievalConfigBundleMessage: "",
+  retrievalSourceIntakeInput: "",
+  retrievalSourceIntakeSampleUrl: false,
+  retrievalSourceIntakeResult: null,
+  retrievalSourceIntakeBusy: false,
+  retrievalSourceIntakeMessage: "",
+  retrievalFieldMapLabSource: "httpjson",
+  retrievalFieldMapLabMode: "columns",
+  retrievalFieldMapLabInput: "",
+  retrievalFieldMapLabConfig: "",
+  retrievalFieldMapLabUseAi: false,
+  retrievalFieldMapLabResult: null,
+  retrievalFieldMapLabBusy: false,
+  retrievalFieldMapLabMessage: "",
+  retrievalLocalPaths: "",
+  retrievalLocalFieldMap: "",
+  retrievalLocalPathsBusy: false,
+  retrievalLocalPathsMessage: "",
+  retrievalLocalPreview: null,
+  retrievalLocalPreviewBusy: false,
+  retrievalLocalPreviewMessage: "",
+  retrievalHttpJsonConfig: "",
+  retrievalHttpJsonTemplates: [],
+  retrievalHttpJsonBusy: false,
+  retrievalHttpJsonMessage: "",
+  retrievalHttpJsonPreview: null,
+  retrievalHttpJsonPreviewBusy: false,
+  retrievalHttpJsonPreviewMessage: "",
+  retrievalSqliteConfig: "",
+  retrievalSqliteTemplates: [],
+  retrievalSqliteBusy: false,
+  retrievalSqliteMessage: "",
+  retrievalSqlitePreview: null,
+  retrievalSqlitePreviewBusy: false,
+  retrievalSqlitePreviewMessage: "",
+  retrievalManifestConfig: "",
+  retrievalManifestTemplates: [],
+  retrievalManifestBusy: false,
+  retrievalManifestMessage: "",
+  retrievalManifestPreview: null,
+  retrievalManifestPreviewBusy: false,
+  retrievalManifestPreviewMessage: "",
+  retrievalBatchQueries: "",
+  retrievalQueryPlan: null,
+  retrievalQueryPlanBusy: false,
+  retrievalQueryPlanUseAi: false,
+  retrievalBatchJobs: [],
+  retrievalBatchBusy: false,
+  retrievalBatchMessage: "",
+  simplePlanBatchJobId: "",
+  simplePlanBatchLoadedJobId: "",
+  simplePlanBatchCandidatesBusy: false,
+  retrievalSimpleBatchLimit: 5,
+  retrievalSimpleSourceLimits: {},
   citationExportFormat: "bibtex",
   citationExportMessage: "",
   citationExportBusy: false,
@@ -118,6 +207,8 @@ const state = {
   creatingCollectionName: "",
 };
 
+let retrievalBatchRefreshTimer = null;
+
 function postJSON(url, payload, method = "POST") {
   return fetch(url, {
     method,
@@ -125,9 +216,14 @@ function postJSON(url, payload, method = "POST") {
     body: JSON.stringify(payload),
   }).then(async (response) => {
     const data = await parseJSONResponse(response);
-    if (!response.ok || data.ok === false) throw new Error(data.error || "请求失败");
+    if (!response.ok || data.ok === false) throw new Error(data.error || data.message || "请求失败");
     return data;
   });
+}
+
+function safeRetrievalEndpoint(endpoint) {
+  const cleanEndpoint = String(endpoint || "").trim();
+  return Boolean(cleanEndpoint) && cleanEndpoint.startsWith("/retrieval/") && !cleanEndpoint.includes("://") && !cleanEndpoint.includes("..");
 }
 
 async function parseJSONResponse(response) {
@@ -142,6 +238,193 @@ async function parseJSONResponse(response) {
 
 function deleteJSON(url, payload = {}) {
   return postJSON(url, payload, "DELETE");
+}
+
+const API_CONFIG_SECRET_KEEP_VALUE = "__KEEP_SECRET__";
+
+async function loadApiConfig(options = {}) {
+  if (!state.libraryId) return;
+  const includeSecrets = Boolean(options.includeSecrets);
+  try {
+    state.apiConfigBusy = true;
+    state.apiConfigMessage = "";
+    renderApiConfigPage();
+    const suffix = includeSecrets ? "?include_secrets=1" : "";
+    const response = await fetch(`/api/library/${state.libraryId}/api-config${suffix}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "API 配置加载失败");
+    state.apiConfig = data.config || {};
+  } catch (error) {
+    state.apiConfigMessage = error.message;
+  } finally {
+    state.apiConfigBusy = false;
+    renderApiConfigPage();
+  }
+}
+
+function apiConfigSourceText(source) {
+  if (source === "preference") return "页面配置";
+  if (source === "environment") return "环境变量";
+  if (source === "default") return "默认值";
+  return "未配置";
+}
+
+function apiConfigTokenValue(service) {
+  const entry = state.apiConfig?.code_sources?.[service] || {};
+  return state.apiConfigShowSecrets ? String(entry.token || "") : "";
+}
+
+function apiConfigSecretPayload(formData, field, configured, source) {
+  const value = String(formData.get(field) || "").trim();
+  if (!state.apiConfigShowSecrets && !value && configured && source === "preference") {
+    return API_CONFIG_SECRET_KEEP_VALUE;
+  }
+  return value;
+}
+
+function renderApiConfigCheck(service) {
+  const result = state.apiConfigCheckResults[service] || null;
+  if (state.apiConfigChecking === service) return `<p class="api-config-message">正在检查 ${escapeHtml(service)}...</p>`;
+  if (!result) return "";
+  const check = result.check || {};
+  const ok = check.ok === true;
+  const text = check.message || check.error || (ok ? "检查通过" : "检查失败");
+  const detail = check.count != null ? `，返回 ${check.count} 条样本` : "";
+  return `<p class="api-config-message ${ok ? "ok" : "failed"}">${escapeHtml(text + detail)}</p>`;
+}
+
+function renderApiConfigPage() {
+  const host = document.querySelector("[data-api-config-panel]");
+  if (!host) return;
+  const config = state.apiConfig || {};
+  const model = config.model || {};
+  const github = config.code_sources?.github || {};
+  const huggingface = config.code_sources?.huggingface || {};
+  const zenodo = config.code_sources?.zenodo || {};
+  const apiKeyValue = state.apiConfigShowSecrets ? String(model.api_key || "") : "";
+  const apiKeyPlaceholder = model.configured
+    ? `${apiConfigSourceText(model.source)}已配置 ${model.masked_api_key || ""}`.trim()
+    : "未配置";
+  const serviceRows = [
+    ["github", "GitHub Token", "github_token", github, "公开仓库搜索；可选，未填也能搜公开资源"],
+    ["huggingface", "HuggingFace Token", "huggingface_token", huggingface, "Hub models / datasets；可选"],
+    ["zenodo", "Zenodo Token", "zenodo_token", zenodo, "公开 records；可选"],
+  ];
+  host.innerHTML = `
+    <section class="api-config-card">
+      <div class="api-config-head">
+        <div>
+          <h2>模型 API</h2>
+          <p>只填三项：模型名称、请求地址、API Key。请求地址可以填根地址，后端会自动补 /v1/chat/completions。</p>
+        </div>
+        <span class="api-status ${model.configured ? "ok" : "failed"}">${model.configured ? "已配置" : "未配置"}</span>
+      </div>
+      <form class="api-config-form" data-api-config-form>
+        <label>
+          <span>模型名称</span>
+          <input name="model" value="${escapeHtml(model.model || "")}" placeholder="gpt-5.5">
+        </label>
+        <label>
+          <span>请求地址</span>
+          <input name="base_url" value="${escapeHtml(model.base_url || "")}" placeholder="https://ai-pixel.online">
+          <em>实际请求：${escapeHtml(model.chat_url || "")}</em>
+        </label>
+        <label>
+          <span>API Key</span>
+          <input name="api_key" type="${state.apiConfigShowSecrets ? "text" : "password"}" value="${escapeHtml(apiKeyValue)}" placeholder="${escapeHtml(apiKeyPlaceholder)}">
+          <em>来源：${escapeHtml(apiConfigSourceText(model.source))}</em>
+        </label>
+        <div class="api-config-actions">
+          <button type="button" class="form-action-btn" data-save-api-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存配置"}</button>
+          <button type="button" class="ghost-btn" data-toggle-api-config-secrets>${state.apiConfigShowSecrets ? "隐藏 key" : "显示 key"}</button>
+          <button type="button" class="ghost-btn" data-check-api-config="model" ${state.apiConfigChecking ? "disabled" : ""}>检查模型</button>
+        </div>
+        ${state.apiConfigMessage ? `<p class="api-config-message">${escapeHtml(state.apiConfigMessage)}</p>` : ""}
+        ${renderApiConfigCheck("model")}
+      </form>
+    </section>
+
+    <section class="api-config-card">
+      <div class="api-config-head">
+        <div>
+          <h2>代码 / 数据源 API</h2>
+          <p>这些 token 都是可选项。未配置时检索公开资源，配置后通常有更高限流或可访问私有资源。</p>
+        </div>
+      </div>
+      <div class="api-source-list">
+        ${serviceRows.map(([service, label, field, entry, hint]) => `
+          <div class="api-source-row">
+            <div>
+              <strong>${escapeHtml(label)}</strong>
+              <span>${escapeHtml(hint)}</span>
+              <em>状态：${entry.configured ? "已配置" : "未配置"}；来源：${escapeHtml(apiConfigSourceText(entry.source))}${entry.masked ? `；${escapeHtml(entry.masked)}` : ""}</em>
+              ${renderApiConfigCheck(service)}
+            </div>
+            <input form="api-config-hidden-form" name="${escapeHtml(field)}" type="${state.apiConfigShowSecrets ? "text" : "password"}" value="${escapeHtml(apiConfigTokenValue(service))}" placeholder="${entry.configured ? "已配置，留空则保留" : "可选"}">
+            <button type="button" class="ghost-btn" data-check-api-config="${escapeHtml(service)}" ${state.apiConfigChecking ? "disabled" : ""}>检查</button>
+          </div>
+        `).join("")}
+      </div>
+      <form id="api-config-hidden-form" data-api-config-hidden-form></form>
+    </section>
+
+  `;
+}
+
+async function saveApiConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const hiddenForm = document.querySelector("[data-api-config-hidden-form]");
+  if (hiddenForm) {
+    new FormData(hiddenForm).forEach((value, key) => formData.set(key, value));
+  }
+  const model = state.apiConfig?.model || {};
+  const code = state.apiConfig?.code_sources || {};
+  const payload = {
+    model: {
+      model: String(formData.get("model") || "").trim(),
+      base_url: String(formData.get("base_url") || "").trim(),
+      api_key: apiConfigSecretPayload(formData, "api_key", model.configured, model.source),
+    },
+    code_sources: {
+      github_token: apiConfigSecretPayload(formData, "github_token", code.github?.configured, code.github?.source),
+      huggingface_token: apiConfigSecretPayload(formData, "huggingface_token", code.huggingface?.configured, code.huggingface?.source),
+      zenodo_token: apiConfigSecretPayload(formData, "zenodo_token", code.zenodo?.configured, code.zenodo?.source),
+    },
+  };
+  try {
+    state.apiConfigBusy = true;
+    state.apiConfigMessage = "";
+    renderApiConfigPage();
+    const data = await postJSON(`/api/library/${state.libraryId}/api-config`, payload);
+    state.apiConfig = data.config || {};
+    state.apiConfigShowSecrets = false;
+    state.apiConfigMessage = "配置已保存。";
+  } catch (error) {
+    state.apiConfigMessage = error.message;
+  } finally {
+    state.apiConfigBusy = false;
+    renderApiConfigPage();
+  }
+}
+
+async function checkApiConfig(service) {
+  if (!service) return;
+  try {
+    state.apiConfigChecking = service;
+    renderApiConfigPage();
+    const data = await postJSON(`/api/library/${state.libraryId}/api-config/check`, { service });
+    state.apiConfigCheckResults = { ...state.apiConfigCheckResults, [service]: data };
+  } catch (error) {
+    state.apiConfigCheckResults = {
+      ...state.apiConfigCheckResults,
+      [service]: { check: { ok: false, error: error.message, message: error.message } },
+    };
+  } finally {
+    state.apiConfigChecking = "";
+    renderApiConfigPage();
+  }
 }
 
 function escapeHtml(value) {
@@ -331,14 +614,26 @@ function importResultMessage(summary) {
   const existing = Number(summary.existing_count || 0);
   const conflict = Number(summary.conflict_count || 0);
   const failed = Number(summary.failed_count || 0);
+  const evidence = importEvidenceMessage(summary.import_evidence);
   const parts = [];
   if (created) parts.push(`新建 ${created} 条`);
   if (existing) parts.push(`复用已有 ${existing} 条`);
   if (conflict) parts.push(`冲突 ${conflict} 条`);
   if (failed) parts.push(`失败 ${failed} 条`);
-  if (!parts.length) return "没有导入条目。";
-  if (existing && !created && !conflict && !failed) return "条目已存在，已定位到已有条目。";
-  return parts.join(" · ");
+  if (!parts.length) return evidence || "没有导入条目。";
+  const message = existing && !created && !conflict && !failed
+    ? "条目已存在，已定位到已有条目。"
+    : parts.join(" · ");
+  return [message, evidence].filter(Boolean).join(" · ");
+}
+
+function importEvidenceMessage(evidence) {
+  if (!evidence || typeof evidence !== "object") return "";
+  const candidates = Number(evidence.candidate_count || 0);
+  const recorded = Number(evidence.provenance_recorded_count || 0);
+  if (!candidates && !recorded) return "";
+  const reportReady = evidence.run_report_markdown_endpoint ? "，报告已就绪" : "";
+  return `溯源记录 ${recorded}/${candidates} 条${reportReady}`;
 }
 
 function renderAddItemResults() {
@@ -357,10 +652,1822 @@ function renderAddItemResults() {
   </div>`;
 }
 
+function retrievalCandidateKey(candidate, index) {
+  const identifiers = candidate.identifiers || candidate.item?.identifiers || {};
+  return [
+    candidate.candidate_id,
+    candidate.source,
+    candidate.external_id,
+    identifiers.doi,
+    identifiers.arxiv,
+    identifiers.pmid,
+    identifiers.isbn,
+    candidate.title,
+    index,
+  ].filter(Boolean).join(":");
+}
+
+function normalizeRetrievalCandidates(candidates) {
+  return (candidates || []).map((candidate, index) => ({
+    ...candidate,
+    client_key: candidate.client_key || retrievalCandidateKey(candidate, index),
+  }));
+}
+
+function retrievalCreatorLine(candidate) {
+  const creators = candidate.creators || candidate.item?.creators || [];
+  const names = creators.map((creator) => {
+    if (creator.name) return creator.name;
+    return [creator.first_name || creator.firstName || "", creator.last_name || creator.lastName || ""].filter(Boolean).join(" ");
+  }).filter(Boolean);
+  return names.slice(0, 3).join("; ") + (names.length > 3 ? ` 等 ${names.length} 位` : "");
+}
+
+function renderRetrievalStats() {
+  if (!state.retrievalStats) return "";
+  return `<div class="retrieval-stats" data-retrieval-stats>
+    ${Object.entries(state.retrievalStats).map(([source, stats]) => {
+      const elapsed = Number(stats.elapsed_ms || 0);
+      const timing = elapsed ? ` · ${elapsed}ms` : "";
+      const label = stats.ok
+        ? `${source} · ${stats.count || 0} 条${timing}`
+        : `${source} · ${stats.error_kind || "失败"}${timing}`;
+      const detail = stats.ok ? "" : (stats.action || stats.error || "该源本次检索失败");
+      return `<span class="${stats.ok ? "ok" : "failed"}" title="${escapeHtml(detail)}">${escapeHtml(label)}</span>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderRetrievalAiSummary() {
+  const summary = state.retrievalAiEvaluationSummary;
+  if (!summary) return "";
+  const counts = summary.decision_counts || {};
+  const parts = [
+    `状态 ${summary.status || "skipped"}`,
+    `推荐 ${Number(counts.recommend || 0)}`,
+    `复核 ${Number(counts.review || 0)}`,
+    `不建议 ${Number(counts.reject || 0)}`,
+    `默认勾选 ${Number(summary.auto_selected_count || 0)}`,
+  ];
+  if (summary.status === "not_configured") parts.push("模型未配置");
+  if (summary.error) parts.push(summary.error);
+  return `<div class="retrieval-ai-summary">${parts.map((part) => `<span>${escapeHtml(part)}</span>`).join("")}</div>`;
+}
+
+function formatPercent(value) {
+  const number = Number(value || 0);
+  return `${Math.round(number * 100)}%`;
+}
+
+function renderRetrievalSummary() {
+  if (state.retrievalSummaryBusy && !state.retrievalSummary) {
+    return `<section class="retrieval-summary" data-retrieval-summary><p class="retrieval-history-message">统计加载中...</p></section>`;
+  }
+  const summary = state.retrievalSummary || null;
+  if (!summary) {
+    return state.retrievalSummaryMessage ? `<p class="retrieval-history-message">${escapeHtml(state.retrievalSummaryMessage)}</p>` : "";
+  }
+  const totals = summary.totals || {};
+  const sources = Object.entries(summary.sources || {})
+    .sort(([, left], [, right]) => Number(right.run_count || 0) - Number(left.run_count || 0))
+    .slice(0, 5);
+  return `<section class="retrieval-summary" data-retrieval-summary>
+    <div class="retrieval-history-head">
+      <div class="retrieval-summary-title">
+        <strong>阶段统计</strong>
+        <span>${escapeHtml(summary.latest_run_at ? `更新 ${formatRetrievalTime(summary.latest_run_at)}` : "暂无检索")}</span>
+      </div>
+      <div class="retrieval-report-actions">
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="markdown" title="下载阶段 Markdown 报告">MD</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="csv" title="下载阶段 CSV 报告">CSV</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="json" title="下载阶段 JSON 报告">JSON</button>
+      </div>
+    </div>
+    ${state.retrievalSummaryMessage ? `<p class="retrieval-history-message">${escapeHtml(state.retrievalSummaryMessage)}</p>` : ""}
+    <div class="retrieval-summary-grid">
+      <span><strong>${Number(totals.run_count || 0)}</strong><em>检索批次</em></span>
+      <span><strong>${Number(totals.candidate_count || 0)}</strong><em>候选条目</em></span>
+      <span><strong>${Number(totals.imported_count || 0)}</strong><em>导入记录</em></span>
+      <span><strong>${formatPercent(totals.import_rate)}</strong><em>导入率</em></span>
+      <span><strong>${formatPercent(totals.source_success_rate)}</strong><em>源成功率</em></span>
+    </div>
+    ${sources.length ? `<div class="retrieval-summary-sources">
+      ${sources.map(([source, item]) => {
+        const failures = Number(item.failure_count || 0);
+        const detail = failures ? `失败 ${failures} 次；${item.last_action || item.last_error || ""}` : "该源最近记录正常";
+        return `<span class="${failures ? "failed" : "ok"}" title="${escapeHtml(detail)}">${escapeHtml(source)} · 成功 ${Number(item.success_count || 0)} / 失败 ${failures} · 平均 ${Number(item.elapsed_avg_ms || 0)}ms</span>`;
+      }).join("")}
+    </div>` : ""}
+  </section>`;
+}
+
+function formatRetrievalTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "");
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatRateLimitSeconds(value) {
+  const seconds = Number(value || 0);
+  if (!seconds) return "";
+  if (seconds >= 1) return `间隔 ${seconds.toFixed(seconds % 1 ? 1 : 0)}s`;
+  return `间隔 ${Math.round(seconds * 1000)}ms`;
+}
+
+function retrievalAiDecisionLabel(decision) {
+  if (decision === "recommend") return "推荐入库";
+  if (decision === "reject") return "不建议";
+  return "需要复核";
+}
+
+function retrievalAiRiskLabel(risk) {
+  if (risk === "high") return "高风险";
+  if (risk === "low") return "低风险";
+  return "中风险";
+}
+
+function renderCandidateAiEvaluation(candidate) {
+  const ai = candidate.ai_evaluation || null;
+  if (!ai || !ai.decision) return "";
+  const decision = String(ai.decision || "review");
+  const reason = String(ai.reason || "").trim();
+  const scores = [
+    ai.relevance_score != null ? `相关 ${Math.round(Number(ai.relevance_score || 0) * 100)}%` : "",
+    ai.quality_score != null ? `质量 ${Math.round(Number(ai.quality_score || 0) * 100)}%` : "",
+    ai.risk_level ? retrievalAiRiskLabel(ai.risk_level) : "",
+    ai.auto_select ? "已默认勾选" : "",
+  ].filter(Boolean).join(" · ");
+  return `<span class="retrieval-ai-row ${escapeHtml(decision)}">
+    <strong>AI：${escapeHtml(retrievalAiDecisionLabel(decision))}</strong>
+    ${scores ? `<em>${escapeHtml(scores)}</em>` : ""}
+    ${reason ? `<small>${escapeHtml(reason)}</small>` : ""}
+  </span>`;
+}
+
+function retrievalRunSourceBadges(run) {
+  const stats = run.source_stats || {};
+  const sources = Array.isArray(run.sources) && run.sources.length ? run.sources : Object.keys(stats);
+  return sources.map((source) => {
+    const item = stats[source] || {};
+    const elapsed = Number(item.elapsed_ms || 0);
+    const wait = Number(item.rate_limit_wait_ms || 0);
+    const timing = elapsed ? ` · ${elapsed}ms` : "";
+    const rateWait = wait ? ` · 等待 ${wait}ms` : "";
+    const text = item.ok === false
+      ? `${source}: ${item.error_kind || "失败"}${timing}${rateWait}`
+      : `${source}: ${Number(item.count || 0)} 条${timing}${rateWait}`;
+    const detail = item.ok === false ? (item.action || item.error || "") : "";
+    return `<span class="${item.ok === false ? "failed" : "ok"}" title="${escapeHtml(detail)}">${escapeHtml(text)}</span>`;
+  }).join("");
+}
+
+function renderRetrievalRuns() {
+  const rows = (state.retrievalRuns || []).map((run) => {
+    const query = run.query || "未命名检索";
+    const candidateCount = Number(run.candidate_count || 0);
+    const importedCount = Number(run.imported_count || 0);
+    return `<div class="retrieval-history-row" data-retrieval-run-row="${escapeHtml(run.run_id || "")}">
+      <div class="retrieval-history-main">
+        <strong>${escapeHtml(query)}</strong>
+        <span>${escapeHtml(formatRetrievalTime(run.created_at))}</span>
+      </div>
+      <div class="retrieval-history-counts">
+        <span>候选 ${candidateCount}</span>
+        <span>已导入 ${importedCount}</span>
+      </div>
+      <div class="retrieval-history-sources">${retrievalRunSourceBadges(run)}</div>
+      <div class="retrieval-report-actions">
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="markdown" title="下载 Markdown 报告">MD</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="csv" title="下载 CSV 报告">CSV</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="json" title="下载 JSON 报告">JSON</button>
+      </div>
+    </div>`;
+  }).join("");
+  return `<section class="retrieval-history" data-retrieval-runs>
+    <div class="retrieval-history-head">
+      <strong>最近检索</strong>
+      <button type="button" class="mini-icon" data-refresh-retrieval-runs title="刷新最近检索">↻</button>
+    </div>
+    ${state.retrievalRunsMessage ? `<p class="retrieval-history-message">${escapeHtml(state.retrievalRunsMessage)}</p>` : ""}
+    ${state.retrievalRunsBusy ? `<p class="retrieval-history-message">加载中...</p>` : rows || `<p class="retrieval-history-message">暂无检索记录</p>`}
+  </section>`;
+}
+
+function renderRetrievalCandidates() {
+  if (!state.retrievalCandidates.length) {
+    if (!state.retrievalStats) return "";
+    return `<div class="retrieval-empty" data-retrieval-empty>没有检索到候选条目</div>`;
+  }
+  return `<div class="retrieval-candidates" data-retrieval-candidates>
+    ${state.retrievalCandidates.map((candidate) => {
+      const identifiers = candidate.identifiers || {};
+      const source = candidate.source || "source";
+      const sources = Array.isArray(candidate.sources) && candidate.sources.length
+        ? candidate.sources
+        : [source, ...(candidate.also_seen_in || [])].filter(Boolean);
+      const sourceLabel = sources.length > 1 ? `多源 ${sources.join(" / ")}` : source;
+      const title = candidate.title || candidate.item?.fields?.title || "未命名候选";
+      const year = candidate.year || "";
+      const venue = candidate.venue || "";
+      const creators = retrievalCreatorLine(candidate);
+      const abstract = candidate.abstract || "";
+      const confidenceLabel = candidate.confidence_label || "";
+      const rankLabel = candidate.rank ? `#${candidate.rank}` : "";
+      const duplicateHint = candidate.duplicate_hint || null;
+      const similarityHint = candidate.similarity_hint || null;
+      const duplicateMatches = (candidate.existing_matches || duplicateHint?.matches || [])
+        .map((match) => match.title || match.key)
+        .filter(Boolean)
+        .slice(0, 2)
+        .join(" / ");
+      const similarityMatches = (candidate.weak_similarity_matches || similarityHint?.matches || [])
+        .map((match) => match.title || match.key)
+        .filter(Boolean)
+        .slice(0, 2)
+        .join(" / ");
+      const rankReasons = (candidate.rank_reasons || candidate.evidence || []).slice(0, 4)
+        .map((reason) => `<span>${escapeHtml(reason)}</span>`)
+        .join("");
+      const multiSourceBadge = sources.length > 1 ? `<span>多源命中 ${sources.length}</span>` : "";
+      const badges = Object.entries(identifiers)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `<span>${escapeHtml(key.toUpperCase())}: ${escapeHtml(value)}</span>`)
+        .join("");
+      return `<label class="retrieval-candidate">
+        <input type="checkbox" data-retrieval-candidate-check="${escapeHtml(candidate.client_key)}" ${state.retrievalSelectedKeys.has(candidate.client_key) ? "checked" : ""}>
+        <span class="retrieval-candidate-body">
+          <span class="retrieval-title-row">
+            <strong>${escapeHtml(title)}</strong>
+            <em>${escapeHtml(sourceLabel)}</em>
+          </span>
+          ${rankLabel || confidenceLabel || rankReasons || multiSourceBadge ? `<span class="retrieval-rank-row">${rankLabel ? `<span>${escapeHtml(rankLabel)}</span>` : ""}${confidenceLabel ? `<span>${escapeHtml(confidenceLabel)}</span>` : ""}${multiSourceBadge}${rankReasons}</span>` : ""}
+          ${duplicateHint ? `<span class="retrieval-duplicate ${escapeHtml(duplicateHint.status || "")}">${escapeHtml(duplicateHint.message || "文库已有匹配条目")}${duplicateMatches ? `：${escapeHtml(duplicateMatches)}` : ""}</span>` : ""}
+          ${similarityHint ? `<span class="retrieval-similarity">${escapeHtml(similarityHint.message || "文库存在疑似相似条目")}${similarityMatches ? `：${escapeHtml(similarityMatches)}` : ""}</span>` : ""}
+          ${renderCandidateAiEvaluation(candidate)}
+          <span class="retrieval-meta">${escapeHtml([creators, year, venue].filter(Boolean).join(" · "))}</span>
+          ${badges ? `<span class="retrieval-badges">${badges}</span>` : ""}
+          ${abstract ? `<span class="retrieval-abstract">${escapeHtml(abstract.slice(0, 260))}${abstract.length > 260 ? "..." : ""}</span>` : ""}
+        </span>
+      </label>`;
+    }).join("")}
+  </div>`;
+}
+
+function selectedRetrievalCandidates() {
+  return state.retrievalCandidates.filter((candidate) => state.retrievalSelectedKeys.has(candidate.client_key));
+}
+
+function setRetrievalCandidateSelection(mode) {
+  state.retrievalSelectedKeys.clear();
+  if (mode === "all") {
+    state.retrievalCandidates.forEach((candidate) => {
+      if (candidate.client_key) state.retrievalSelectedKeys.add(candidate.client_key);
+    });
+  } else if (mode === "ai") {
+    state.retrievalCandidates.forEach((candidate) => {
+      const decision = String(candidate.ai_evaluation?.decision || "").toLowerCase();
+      if (candidate.client_key && decision === "recommend") state.retrievalSelectedKeys.add(candidate.client_key);
+    });
+  }
+  renderRetrievalPage();
+}
+
+function retrievalSourceSetupText(info) {
+  const setup = info.setup || {};
+  const configEnv = setup.config_env || "";
+  const alternateEnv = setup.alternate_config_env || "";
+  if (setup.config_mode === "preference_or_env" && configEnv) return `配置：面板或 ${configEnv}`;
+  if (setup.config_mode === "required_any_env" && configEnv && alternateEnv) return `配置：${configEnv} 或 ${alternateEnv}`;
+  if (setup.config_mode === "required_env" && configEnv) return `配置：${configEnv}`;
+  if (setup.config_mode === "optional_env" && configEnv) return `可选：${configEnv}`;
+  return "";
+}
+
+function retrievalSourceSetupTitle(info) {
+  const setup = info.setup || {};
+  const parts = [];
+  const setupText = retrievalSourceSetupText(info);
+  if (setupText) parts.push(setupText);
+  if (setup.preference_api) parts.push(`文库配置 API：${setup.preference_api}`);
+  if (setup.rate_limit_env) parts.push(`源级限流：${setup.rate_limit_env}`);
+  if (setup.global_rate_limit_env) parts.push(`全局限流：${setup.global_rate_limit_env}`);
+  (setup.notes || []).forEach((note) => {
+    if (note) parts.push(note);
+  });
+  return parts.join("\n");
+}
+
+function renderRetrievalSourceOption(name, fallbackLabel) {
+  const info = state.retrievalSourceInfo[name] || {};
+  const label = info.label || fallbackLabel;
+  const unavailable = info.available === false;
+  const checked = !unavailable && state.retrievalSources.has(name);
+  const health = info.health || null;
+  const healthText = health ? (health.ok ? `健康 ${health.elapsed_ms || 0}ms` : `${health.error_kind || "异常"}：${health.action || health.error || ""}`) : "";
+  const rateText = formatRateLimitSeconds(info.rate_limit_seconds);
+  const note = info.rate_limit_note || "";
+  const setupText = retrievalSourceSetupText(info);
+  const setupTitle = retrievalSourceSetupTitle(info);
+  const title = [note, setupTitle].filter(Boolean).join("\n");
+  const status = [info.message || (state.retrievalSourcesBusy ? "检查中" : ""), rateText, healthText].filter(Boolean).join("；");
+  const showSetup = Boolean(setupText && (unavailable || info.optional_config));
+  return `<label class="${unavailable ? "unavailable" : ""} ${health && health.ok === false ? "warning" : ""}" title="${escapeHtml(title)}">
+    <input type="checkbox" name="sources" value="${escapeHtml(name)}" ${checked ? "checked" : ""} ${unavailable ? "disabled" : ""}>
+    <span>${escapeHtml(label)}</span>
+    ${status ? `<em class="retrieval-source-status">${escapeHtml(status)}</em>` : ""}
+    ${showSetup ? `<small class="retrieval-source-setup">${escapeHtml(setupText)}</small>` : ""}
+  </label>`;
+}
+
+function retrievalReadinessStatusLabel(status) {
+  return {
+    ready: "Ready",
+    warning: "Review",
+    blocked: "Blocked",
+    needs_sampling: "Sampling",
+    good: "Good",
+    empty: "Empty",
+    poor: "Poor",
+    error: "Error",
+    skipped: "Skipped",
+    missing: "Missing",
+    active: "Active",
+    failed_queries: "Failed",
+    source_errors: "Src errors",
+    incomplete: "Incomplete",
+    source_gap: "Source gap",
+    no_candidates: "No hits",
+    low_sample: "Low sample",
+    passed: "Passed",
+  }[status] || "Review";
+}
+
+function renderRetrievalReadiness() {
+  const readiness = state.retrievalReadiness;
+  if (!readiness && !state.retrievalReadinessBusy && !state.retrievalReadinessMessage) return "";
+  const summary = readiness?.summary || {};
+  const status = readiness?.status || (state.retrievalReadinessBusy ? "warning" : "skipped");
+  const entries = (readiness?.previews || [])
+    .filter((entry) => entry.configured || entry.previewed || entry.status !== "skipped")
+    .map((entry) => {
+      const quality = entry.quality || {};
+      const fieldMapSuggestion = entry.field_map_suggestion || {};
+      const fieldMapCount = Number(fieldMapSuggestion.suggested_field_count || 0);
+      const fieldMapDetail = fieldMapCount
+        ? `map ${fieldMapCount}${fieldMapSuggestion.draft_available ? " / draft" : ""}`
+        : (fieldMapSuggestion.status === "error" ? "map error" : "");
+      const recommendations = (entry.recommendations || quality.recommendations || []).slice(0, 2).join(" / ");
+      const applyDraft = fieldMapSuggestion.draft_available
+        ? `<button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-readiness-field-map="${escapeHtml(entry.name || "")}" title="Apply field_map draft">Apply</button>`
+        : "";
+      const details = [
+        `${Number(entry.sample_count || 0)} samples`,
+        quality.score !== undefined ? `score ${quality.score}` : "",
+        fieldMapDetail,
+        recommendations,
+      ].filter(Boolean).join(" / ");
+      return `<span class="${escapeHtml(entry.status || "skipped")}" title="${escapeHtml(entry.message || recommendations || "")}">
+        <strong>${escapeHtml(entry.label || entry.name || "Source")}</strong>
+        <em>${escapeHtml(retrievalReadinessStatusLabel(entry.status))}${details ? ` / ${details}` : ""}</em>
+        ${applyDraft}
+      </span>`;
+    }).join("");
+  const message = state.retrievalReadinessMessage || readiness?.message || "";
+  return `<section class="retrieval-readiness" data-retrieval-readiness>
+    <div class="retrieval-readiness-head">
+      <strong class="${escapeHtml(status)}">${escapeHtml(retrievalReadinessStatusLabel(status))}</strong>
+      <span>${escapeHtml(message || "No readiness check has run yet.")}</span>
+    </div>
+    <div class="retrieval-readiness-grid">
+      <span><strong>${Number(summary.available_source_count || 0)}</strong><em>available sources</em></span>
+      <span><strong>${Number(summary.configured_internal_count || 0)}</strong><em>configured internal</em></span>
+      <span><strong>${Number(summary.previewed_internal_count || 0)}</strong><em>previewed internal</em></span>
+      <span><strong>${Number(summary.sample_count || 0)}</strong><em>samples</em></span>
+    </div>
+    <div class="retrieval-readiness-sources">${entries || `<p class="retrieval-history-message">No internal source configured.</p>`}</div>
+  </section>`;
+}
+
+function retrievalSourceEvidenceStatus(item) {
+  if (Number(item?.failure_count || 0)) return "source_errors";
+  if (Number(item?.query_count || 0)) return "passed";
+  if (item?.requested) return "missing";
+  return "skipped";
+}
+
+function retrievalSourceEvidenceDiagnostic(item) {
+  const errorKind = String(item?.latest_error_kind || "").trim();
+  const diagnostic = String(item?.latest_diagnostic || "").trim();
+  if (errorKind && diagnostic && errorKind !== diagnostic) return `${errorKind}: ${diagnostic}`;
+  return errorKind || diagnostic || "";
+}
+
+function renderRetrievalOnboardingSourceEvidence(batch) {
+  const evidence = Array.isArray(batch?.source_evidence) ? batch.source_evidence : [];
+  if (!evidence.length) return "";
+  const entries = evidence.map((item) => {
+    const status = retrievalSourceEvidenceStatus(item);
+    const diagnostic = retrievalSourceEvidenceDiagnostic(item);
+    const detail = [
+      `q ${Number(item.query_count || 0)}`,
+      `ok ${Number(item.success_count || 0)}`,
+      `fail ${Number(item.failure_count || 0)}`,
+      `hits ${Number(item.candidate_count || 0)}`,
+      `${Number(item.elapsed_ms || 0)}ms`,
+    ].join(" / ");
+    const title = [
+      item.requested ? "requested" : "observed",
+      detail,
+      diagnostic,
+    ].filter(Boolean).join("\n");
+    return `<span class="${escapeHtml(status)}" title="${escapeHtml(title)}">
+      <strong>${escapeHtml(item.source || "source")}</strong>
+      <em>${escapeHtml(detail)}${diagnostic ? ` / ${escapeHtml(diagnostic)}` : ""}</em>
+    </span>`;
+  }).join("");
+  return `<div class="retrieval-readiness-sources retrieval-source-evidence" data-retrieval-onboarding-source-evidence>${entries}</div>`;
+}
+
+function renderRetrievalOnboardingGates(onboarding) {
+  const gates = Array.isArray(onboarding?.acceptance_gates) ? onboarding.acceptance_gates : [];
+  if (!gates.length) return "";
+  const entries = gates.map((gate) => {
+    const status = gate.status || "warning";
+    const evidence = gate.evidence || "";
+    const message = gate.message || "";
+    const artifacts = Array.isArray(gate.artifacts) ? gate.artifacts : [];
+    const artifactButtons = artifacts.slice(0, 3).map((artifact) => {
+      const endpoint = artifact.endpoint || "";
+      if (!endpoint) return "";
+      return `<button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-gate-artifact="${escapeHtml(endpoint)}" title="${escapeHtml(artifact.label || "Download artifact")}">${escapeHtml(artifact.label || "Artifact")}</button>`;
+    }).join("");
+    const title = [evidence, message].filter(Boolean).join("\n");
+    return `<span class="${escapeHtml(status)}" title="${escapeHtml(title)}">
+      <strong>${escapeHtml(gate.label || gate.name || "Gate")}</strong>
+      <em>${escapeHtml(retrievalReadinessStatusLabel(status))}${evidence ? ` / ${escapeHtml(evidence)}` : ""}</em>
+      ${artifactButtons}
+    </span>`;
+  }).join("");
+  return `<div class="retrieval-readiness-sources retrieval-onboarding-gates" data-retrieval-onboarding-gates>${entries}</div>`;
+}
+
+function retrievalRemediationButtonHtml(remediation, scope) {
+  const method = String(remediation?.method || "GET").trim().toUpperCase();
+  const endpoint = String(remediation?.endpoint || "").trim();
+  const label = String(remediation?.label || "").trim();
+  const queryCount = Array.isArray(remediation?.queries) ? remediation.queries.length : 0;
+  const canRunBatch = endpoint !== "/retrieval/batches" || queryCount > 0;
+  if (method !== "POST" || !safeRetrievalEndpoint(endpoint) || !label || !canRunBatch) return "";
+  return `<button type="button" class="mini-icon retrieval-report-btn" data-run-retrieval-remediation="${escapeHtml(scope)}" title="${escapeHtml(`${method} ${endpoint}`)}">${escapeHtml(label)}</button>`;
+}
+
+function renderRetrievalOnboarding() {
+  const onboarding = state.retrievalOnboarding;
+  if (!onboarding && !state.retrievalOnboardingBusy && !state.retrievalOnboardingMessage) return "";
+  const summary = onboarding?.summary || {};
+  const batch = onboarding?.batch_validation || {};
+  const importReadiness = onboarding?.import_readiness || {};
+  const status = onboarding?.status || (state.retrievalOnboardingBusy ? "warning" : "skipped");
+  const message = state.retrievalOnboardingMessage || onboarding?.message || "";
+  const batchStatus = batch.status || summary.batch_validation_status || "";
+  const batchMessage = batch.message || summary.batch_validation_message || "";
+  const latestJobId = batch.latest_job_id || "";
+  const batchRemediation = batch.remediation || {};
+  const batchRemediationButton = retrievalRemediationButtonHtml(batchRemediation, "onboarding");
+  const queryCoverageLabel = summary.validation_query_source === "explicit" ? "query coverage" : "PLAN coverage";
+  const configContextStatus = summary.batch_config_context_status || batch.config_context_status || "unknown";
+  const configContextTitle = [
+    `matched ${Number(summary.batch_config_matched_job_count || batch.config_matched_job_count || 0)}`,
+    `mismatch ${Number(summary.batch_config_mismatch_job_count || batch.config_mismatch_job_count || 0)}`,
+    `unknown ${Number(summary.batch_config_unknown_job_count || batch.config_unknown_job_count || 0)}`,
+  ].join(" / ");
+  const batchActions = latestJobId || batchRemediationButton
+    ? `<div class="retrieval-local-config-actions retrieval-onboarding-actions">
+        ${latestJobId ? `<button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-batch-report="${escapeHtml(latestJobId)}" data-report-format="markdown" title="Download latest batch validation report">Batch report</button>` : ""}
+        ${latestJobId ? `<button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-batch-report="${escapeHtml(latestJobId)}" data-report-format="csv" data-report-scope="sources" title="Download latest batch source evidence CSV">Source CSV</button>` : ""}
+        ${batchRemediationButton}
+      </div>`
+    : "";
+  const recommendations = (onboarding?.recommendations || []).slice(0, 3)
+    .map((item) => `<span class="${escapeHtml(status)}" title="${escapeHtml(item)}"><strong>Next</strong><em>${escapeHtml(item)}</em></span>`)
+    .join("");
+  return `<section class="retrieval-readiness retrieval-onboarding" data-retrieval-onboarding>
+    <div class="retrieval-readiness-head">
+      <strong class="${escapeHtml(status)}">${escapeHtml(retrievalReadinessStatusLabel(status))}</strong>
+      <span>${escapeHtml(message || "No onboarding check has run yet.")}</span>
+    </div>
+    <div class="retrieval-readiness-grid">
+      <span><strong>${escapeHtml(retrievalReadinessStatusLabel(batchStatus || "missing"))}</strong><em>batch validation</em></span>
+      <span><strong>${Number(summary.batch_completed_queries || batch.completed_queries || 0)}/${Number(summary.batch_required_completed_queries || batch.required_completed_queries || 0)}</strong><em>query samples</em></span>
+      <span title="${escapeHtml((summary.batch_missing_queries || batch.missing_queries || []).join("; "))}"><strong>${Number(summary.batch_covered_query_count || batch.covered_query_count || 0)}/${Number(summary.batch_required_query_count || batch.required_query_count || 0)}</strong><em>${escapeHtml(queryCoverageLabel)}</em></span>
+      <span><strong>${escapeHtml(summary.validation_query_source || "query_plan")}</strong><em>query source</em></span>
+      <span><strong>${escapeHtml(summary.query_plan_ai_status || "skipped")}</strong><em>AI PLAN</em></span>
+      <span><strong>${Number(summary.batch_validated_source_count || batch.validated_source_count || 0)}/${Number(summary.batch_required_source_count || batch.required_source_count || 0)}</strong><em>source coverage</em></span>
+      <span title="${escapeHtml(configContextTitle)}"><strong>${escapeHtml(configContextStatus)}</strong><em>config evidence</em></span>
+      <span title="${escapeHtml(importReadiness.message || "")}"><strong>${Number(summary.import_readiness_ready_candidate_count || importReadiness.ready_candidate_count || 0)}/${Number(summary.import_readiness_checked_candidate_count || importReadiness.checked_candidate_count || 0)}</strong><em>import ready</em></span>
+      <span><strong>${Number(summary.batch_failed_queries || batch.failed_queries || 0)}</strong><em>failed queries</em></span>
+      <span><strong>${Number(summary.batch_source_error_count || batch.source_error_count || 0)}</strong><em>source errors</em></span>
+    </div>
+    ${batchMessage ? `<p class="retrieval-source-message">${escapeHtml(batchMessage)}</p>` : ""}
+    ${batchActions}
+    ${renderRetrievalOnboardingGates(onboarding)}
+    ${renderRetrievalOnboardingSourceEvidence(batch)}
+    <div class="retrieval-readiness-sources">${recommendations || `<p class="retrieval-history-message">No onboarding recommendations yet.</p>`}</div>
+  </section>`;
+}
+
+function renderRetrievalConfigBundleImportResult(result) {
+  if (!result) return "";
+  const applied = Array.isArray(result.applied) ? result.applied : [];
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  const actionText = result.dry_run ? "would apply" : "applied";
+  const rows = [
+    ...applied.map((item) => `<span class="ok"><em>${escapeHtml(item.source || "")}</em>${escapeHtml(item.action || actionText)}</span>`),
+    ...skipped.map((item) => `<span class="warning"><em>${escapeHtml(item.source || "")}</em>${escapeHtml(item.reason || "skipped")}</span>`),
+  ].join("");
+  return `<div class="retrieval-local-preview retrieval-config-bundle-result" data-retrieval-config-bundle-result>
+    <div class="retrieval-local-preview-head">
+      <strong>${escapeHtml(result.dry_run ? "Dry-run result" : "Import result")}</strong>
+      <span>${applied.length} ${escapeHtml(actionText)} / ${skipped.length} skipped</span>
+      <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-config-bundle-result title="Download config bundle result CSV">CSV</button>
+    </div>
+    <div class="retrieval-local-preview-issues">${rows || `<span>No source changes</span>`}</div>
+  </div>`;
+}
+
+function renderRetrievalConfigBundleImport() {
+  return `<section class="retrieval-local-config retrieval-config-bundle" data-retrieval-config-bundle-import>
+    <div class="retrieval-source-config-head">
+      <div>
+        <span class="retrieval-config-kicker">配置包</span>
+        <h3>导入别人给你的源配置</h3>
+        <p>如果队友已经整理好脱敏配置包，把 JSON 粘贴到这里，先 Dry run，再 Import。</p>
+      </div>
+    </div>
+    <form data-retrieval-config-bundle-form>
+      <label>
+        <span>Config bundle JSON</span>
+        <textarea name="bundle" rows="5" data-retrieval-config-bundle-input placeholder='{"schema":"web-library.retrieval-config-bundle/v1","sources":{}}'>${escapeHtml(state.retrievalConfigBundleText)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="button" class="mini-icon retrieval-report-btn" data-dry-run-retrieval-config-bundle ${state.retrievalConfigBundleBusy ? "disabled" : ""} title="Preview config bundle import">${state.retrievalConfigBundleBusy ? "..." : "Dry run"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-import-retrieval-config-bundle ${state.retrievalConfigBundleBusy ? "disabled" : ""} title="Import config bundle">Import</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-config-bundle ${state.retrievalConfigBundleBusy ? "disabled" : ""} title="Clear config bundle draft">Clear</button>
+      </div>
+      ${state.retrievalConfigBundleMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalConfigBundleMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalConfigBundleImportResult(state.retrievalConfigBundleResult)}
+  </section>`;
+}
+
+function retrievalSourceStatusText(name) {
+  const info = state.retrievalSourceInfo[name] || {};
+  if (state.retrievalSourcesBusy) return "检查中";
+  if (info.available === false) return info.message || "未配置";
+  if (info.available === true) return info.message || "可用";
+  return "未检查";
+}
+
+function retrievalSourceStatusClass(name) {
+  const info = state.retrievalSourceInfo[name] || {};
+  if (info.available === false) return "blocked";
+  if (info.available === true) return "ready";
+  return "unknown";
+}
+
+function renderRetrievalSourceStatusBadge(name) {
+  return `<span class="retrieval-source-config-status ${retrievalSourceStatusClass(name)}">${escapeHtml(retrievalSourceStatusText(name))}</span>`;
+}
+
+function renderRetrievalSourceConfigGuide() {
+  const publicSources = [
+    ["论文文献", "期刊论文、会议论文、跨库论文元数据", [
+      ["crossref", "Crossref", "论文 DOI/期刊元数据"],
+      ["semanticscholar", "Semantic Scholar", "论文补充和相似论文"],
+      ["openalex", "OpenAlex", "开放学术图谱"],
+    ]],
+    ["预印本", "arXiv、bioRxiv、medRxiv 等预发表论文", [
+      ["arxiv", "arXiv", "通用预印本"],
+      ["biorxiv", "bioRxiv", "生命科学预印本"],
+      ["medrxiv", "medRxiv", "医学预印本"],
+    ]],
+    ["领域库", "生命科学、天文物理等专业数据库", [
+      ["pubmed", "PubMed", "生命科学和医学"],
+      ["ads", "NASA ADS", "天文/物理"],
+    ]],
+    ["数据集 / 软件 / 代码对象", "带 DOI 或清单的研究数据、软件、代码产物", [
+      ["datacite", "DataCite", "数据集、软件 DOI、报告"],
+      ["manifest", "Manifest", "代码包、附件、对象清单"],
+    ]],
+    ["图书 / 其他资料", "图书、章节和非论文型资料", [
+      ["openlibrary", "OpenLibrary", "图书元数据"],
+    ]],
+  ].map(([category, description, sources]) => `<article class="retrieval-public-source-category">
+    <div>
+      <strong>${escapeHtml(category)}</strong>
+      <em>${escapeHtml(description)}</em>
+    </div>
+    <div>${sources.map(([name, label, hint]) => `<span>
+      <strong>${escapeHtml(label)}</strong>
+      <em>${escapeHtml(hint)}</em>
+      ${renderRetrievalSourceStatusBadge(name)}
+    </span>`).join("")}</div>
+  </article>`).join("");
+  const internalSources = [
+    ["#source-localfile-config", "Local CSV/JSONL", "本地表格、导出的论文清单、实验记录表", "结构化文件", "路径 + field_map"],
+    ["#source-httpjson-config", "HTTP JSON", "内部检索接口、代码仓库索引 API、第三方 JSON API", "接口服务", "url_template + items_path + field_map"],
+    ["#source-sqlite-config", "SQLite", "本机数据库、代码/数据资产索引库、已有元数据表", "数据库", "path + query + field_map"],
+    ["#source-manifest-config", "Manifest", "代码包、数据集对象、附件、PDF、对象 URL 清单", "对象清单", "manifest_path + items_path + field_map"],
+  ].map(([href, title, useCase, typeLabel, required]) => `<a href="${href}">
+    <strong>${escapeHtml(title)}</strong>
+    <b>${escapeHtml(typeLabel)}</b>
+    <span>${escapeHtml(useCase)}</span>
+    <em>必填：${escapeHtml(required)}</em>
+  </a>`).join("");
+  return `<section class="retrieval-source-config-guide">
+    <div class="retrieval-source-config-head">
+      <div>
+        <span class="retrieval-config-kicker">源配置说明</span>
+        <h3>先判断你要接哪种源</h3>
+        <p>这里按资料对象分类：论文、预印本、领域库、数据集/软件/代码对象、图书，以及本地/内部系统。</p>
+      </div>
+      <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "刷新状态"}</button>
+    </div>
+    <div class="retrieval-config-steps">
+      <span><strong>1. 选源类型</strong><em>看你的数据是文件、接口、数据库还是清单。</em></span>
+      <span><strong>2. 填最少字段</strong><em>先让源能返回 title / doi / year 等元数据。</em></span>
+      <span><strong>3. 保存并预览</strong><em>点保存配置，再用预览或检查确认映射正常。</em></span>
+      <span><strong>4. 回到上方检索</strong><em>勾选该源，输入关键词开始检索。</em></span>
+    </div>
+    <div class="retrieval-public-sources">
+      <strong>公共源按资料类型分类</strong>
+      ${publicSources}
+    </div>
+    <div class="retrieval-internal-source-title">
+      <strong>本地/内部异构源</strong>
+      <em>用于接入比赛数据、代码索引、内部 API、数据库或对象清单。</em>
+    </div>
+    <div class="retrieval-config-source-links">${internalSources}</div>
+  </section>`;
+}
+
+function renderRetrievalSourceConfigHeader(sourceName, title, description, requiredItems, nextStep) {
+  return `<div class="retrieval-source-config-head">
+    <div>
+      <span class="retrieval-config-kicker">源配置</span>
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(description)}</p>
+    </div>
+    ${renderRetrievalSourceStatusBadge(sourceName)}
+  </div>
+  <div class="retrieval-config-required">
+    ${requiredItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+    ${nextStep ? `<em>${escapeHtml(nextStep)}</em>` : ""}
+  </div>`;
+}
+
+function renderRetrievalSourceIntakeResult(result) {
+  if (!result) return "";
+  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const suggestion = result.field_map_suggestion || {};
+  const fieldMap = suggestion.field_map || {};
+  const signals = result.signals || {};
+  const validation = result.validation_queries || {};
+  const targetSource = result.target_source || {};
+  const validationPlan = result.validation_plan || {};
+  const batchValidation = validationPlan.batch_validation || {};
+  const batchRemediation = batchValidation.remediation || {};
+  const batchRemediationButton = retrievalRemediationButtonHtml(batchRemediation, "source-intake");
+  const candidateRows = candidates.slice(0, 4)
+    .map((item) => `<span title="${escapeHtml((item.reasons || []).join("; "))}"><em>${escapeHtml(item.label || item.source_type || "")}</em>${Math.round(Number(item.score || 0) * 100)}% / ${escapeHtml(item.endpoint || "")}</span>`)
+    .join("");
+  const requiredRows = (candidates[0]?.required || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  const fieldRows = Object.entries(fieldMap)
+    .map(([target, sourcePath]) => `<span><em>${escapeHtml(target)}</em>${escapeHtml(sourcePath)}</span>`)
+    .join("");
+  const validationRows = (validation.queries || []).slice(0, 5)
+    .map((item) => `<span title="${escapeHtml(item.reason || "")}"><em>${escapeHtml(item.query || "")}</em>${Number(item.sample_count || 0)} sample</span>`)
+    .join("");
+  const intakeConfigContextTitle = [
+    `matched ${Number(batchValidation.config_matched_job_count || 0)}`,
+    `mismatch ${Number(batchValidation.config_mismatch_job_count || 0)}`,
+    `unknown ${Number(batchValidation.config_unknown_job_count || 0)}`,
+  ].join(" / ");
+  const targetSourceRows = [
+    targetSource.name ? `<span><em>target source</em>${escapeHtml(targetSource.name)}${targetSource.endpoint ? ` / ${escapeHtml(targetSource.endpoint)}` : ""}</span>` : "",
+    validationPlan.minimum_queries ? `<span><em>minimum queries</em>${Number(validationPlan.minimum_queries || 0)}</span>` : "",
+    validationPlan.query_count !== undefined ? `<span><em>draft queries</em>${Number(validationPlan.query_count || 0)}</span>` : "",
+    batchValidation.status ? `<span title="${escapeHtml(batchValidation.message || "")}"><em>batch evidence</em>${escapeHtml(batchValidation.status || "")} / ${Number(batchValidation.completed_queries || 0)} of ${Number(batchValidation.required_completed_queries || 0)}</span>` : "",
+    batchValidation.required_query_count ? `<span title="${escapeHtml((batchValidation.missing_queries || []).join("; "))}"><em>draft coverage</em>${Number(batchValidation.covered_query_count || 0)} of ${Number(batchValidation.required_query_count || 0)}</span>` : "",
+    batchValidation.config_context_status ? `<span title="${escapeHtml(intakeConfigContextTitle)}"><em>config evidence</em>${escapeHtml(batchValidation.config_context_status || "")}</span>` : "",
+    batchRemediation.label ? `<span title="${escapeHtml(`${batchRemediation.method || "GET"} ${batchRemediation.endpoint || ""}`)}"><em>next action</em>${escapeHtml(batchRemediation.label || "")}</span>` : "",
+  ].filter(Boolean).join("");
+  const validationGateRows = (validationPlan.gates || []).slice(0, 4)
+    .map((gate) => `<span title="${escapeHtml(gate.evidence || "")}"><em>${escapeHtml(gate.label || gate.name || "")}</em>${escapeHtml(gate.status || "")}${gate.endpoint ? ` / ${escapeHtml(gate.endpoint)}` : ""}</span>`)
+    .join("");
+  const validationArtifactRows = (validationPlan.artifacts || []).slice(0, 5)
+    .map((artifact) => `<span><em>${escapeHtml(artifact.label || "")}</em>${escapeHtml(artifact.endpoint || "")}</span>`)
+    .join("");
+  const signalRows = [
+    signals.extension ? `ext .${signals.extension}` : "",
+    signals.has_url ? "url" : "",
+    signals.has_sql ? "sql" : "",
+    signals.has_json_sample ? "json" : "",
+    signals.items_path ? `items ${signals.items_path}` : "",
+    signals.column_count ? `${signals.column_count} columns` : "",
+    signals.sampled_path ? `sample ${signals.sampled_path}` : "",
+    signals.sampled_url ? `url sample ${signals.sampled_url}` : "",
+    signals.sampled_table ? `table ${signals.sampled_table}` : "",
+    signals.sampling_error ? `sample error ${signals.sampling_error}` : "",
+  ].filter(Boolean).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  return `<div class="retrieval-local-preview retrieval-source-intake-result" data-retrieval-source-intake-result>
+    <div class="retrieval-local-preview-head">
+      <strong>${escapeHtml(result.source_type || "source")} / ${escapeHtml(result.status || "")}</strong>
+      <span>${Math.round(Number(result.confidence || 0) * 100)}% confidence</span>
+    </div>
+    ${candidateRows ? `<div class="retrieval-local-preview-fields">${candidateRows}</div>` : ""}
+    ${signalRows ? `<div class="retrieval-local-preview-fields">${signalRows}</div>` : ""}
+    ${requiredRows ? `<div class="retrieval-local-preview-issues">${requiredRows}</div>` : ""}
+    <div class="retrieval-local-preview-mappings">${fieldRows || `<span class="unmapped">No field_map draft yet</span>`}</div>
+    ${validationRows ? `<div class="retrieval-local-preview-fields">${validationRows}</div>` : ""}
+    ${validationPlan.status ? `<div class="retrieval-local-preview-head"><strong>Validation plan / ${escapeHtml(validationPlan.status || "")}</strong><span>${escapeHtml(validationPlan.message || "")}</span></div>` : ""}
+    ${batchRemediationButton ? `<div class="retrieval-local-config-actions retrieval-source-intake-actions">${batchRemediationButton}</div>` : ""}
+    ${targetSourceRows ? `<div class="retrieval-local-preview-fields">${targetSourceRows}</div>` : ""}
+    ${validationGateRows ? `<div class="retrieval-local-preview-fields">${validationGateRows}</div>` : ""}
+    ${validationArtifactRows ? `<div class="retrieval-local-preview-fields">${validationArtifactRows}</div>` : ""}
+  </div>`;
+}
+
+function renderRetrievalSourceIntake() {
+  const draftAvailable = Boolean(state.retrievalSourceIntakeResult?.field_map_lab);
+  const configDraft = state.retrievalSourceIntakeResult?.field_map_suggestion?.config_draft || {};
+  const configDraftAvailable = Boolean(configDraft && Object.keys(configDraft).length);
+  const validationQueryText = String(state.retrievalSourceIntakeResult?.validation_queries?.query_text || "").trim();
+  const validationQueryAvailable = Boolean(validationQueryText);
+  return `<section class="retrieval-local-config retrieval-source-intake" data-retrieval-source-intake>
+    <div class="retrieval-source-config-head">
+      <div>
+        <span class="retrieval-config-kicker">快速识别</span>
+        <h3>不知道怎么配时，先粘贴源信息</h3>
+        <p>可以粘贴文件路径、接口 URL、SQL、CSV 表头或 JSON 样例，系统会判断适合放到哪类源配置。</p>
+      </div>
+    </div>
+    <label>
+      <span>源信息</span>
+      <small>示例：C:\\data\\items.csv，https://api.example.test/search?q={query}，或 SELECT title, doi FROM records。</small>
+      <textarea name="source_intake" rows="4" data-retrieval-source-intake-input placeholder="C:\\data\\items.csv or https://api.example.test/search?q={query} or SELECT title, doi FROM records">${escapeHtml(state.retrievalSourceIntakeInput)}</textarea>
+    </label>
+    <div class="retrieval-local-config-actions">
+      <label>
+        <span>真实请求采样</span>
+        <input type="checkbox" data-retrieval-source-intake-sample-url ${state.retrievalSourceIntakeSampleUrl ? "checked" : ""} ${state.retrievalSourceIntakeBusy ? "disabled" : ""}>
+      </label>
+      <button type="button" class="mini-icon retrieval-report-btn" data-analyze-retrieval-source-intake ${state.retrievalSourceIntakeBusy ? "disabled" : ""} title="分析源信息">${state.retrievalSourceIntakeBusy ? "..." : "分析"}</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-source-intake data-report-format="markdown" ${state.retrievalSourceIntakeBusy ? "disabled" : ""} title="下载源识别报告">报告</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-source-intake ${state.retrievalSourceIntakeBusy || !draftAvailable ? "disabled" : ""} title="把识别结果放入字段映射实验室">去映射</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-source-intake-config ${state.retrievalSourceIntakeBusy || !configDraftAvailable ? "disabled" : ""} title="把识别出的配置草稿写入目标源">套用配置</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-source-intake-queries ${state.retrievalSourceIntakeBusy || !validationQueryAvailable ? "disabled" : ""} title="把验证 query 放入批量检索">套用 query</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-source-intake ${state.retrievalSourceIntakeBusy ? "disabled" : ""} title="清空源识别">清空</button>
+    </div>
+    ${state.retrievalSourceIntakeMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourceIntakeMessage)}</p>` : ""}
+    ${renderRetrievalSourceIntakeResult(state.retrievalSourceIntakeResult)}
+  </section>`;
+}
+
+function renderRetrievalFieldMapLabResult(result) {
+  if (!result) return "";
+  const fieldMap = result.field_map || {};
+  const quality = result.quality || {};
+  const ai = result.ai_enhancement || {};
+  const suggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
+  const recommendations = Array.isArray(quality.recommendations) ? quality.recommendations : [];
+  const fieldRows = Object.entries(fieldMap)
+    .map(([target, sourcePath]) => `<span><em>${escapeHtml(target)}</em>${escapeHtml(sourcePath)}</span>`)
+    .join("");
+  const suggestionRows = suggestions.slice(0, 12)
+    .map((item) => `<span title="${escapeHtml(item.reason || "")}"><em>${escapeHtml(item.target || "")}</em>${escapeHtml(item.source_path || "")}</span>`)
+    .join("");
+  const recommendationRows = recommendations.slice(0, 4).map((message) => `<span>${escapeHtml(message)}</span>`).join("");
+  const aiStatus = ai.requested
+    ? `<span title="${escapeHtml(ai.message || "")}">AI ${escapeHtml(ai.status || "requested")} - ${Number(ai.applied_field_count || 0)} applied</span>`
+    : "";
+  const score = Math.round(Number(quality.score || 0) * 100);
+  return `<div class="retrieval-local-preview retrieval-field-map-lab-result" data-retrieval-field-map-lab-result>
+    <div class="retrieval-local-preview-head">
+      <strong>${escapeHtml(quality.status || "field_map")}${quality.status ? ` / ${score}%` : ""}</strong>
+      <span>${Object.keys(fieldMap).length} fields / ${suggestions.length} suggestions</span>
+    </div>
+    <div class="retrieval-local-preview-mappings">${fieldRows || `<span class="unmapped">No field_map suggestions</span>`}</div>
+    ${suggestionRows ? `<div class="retrieval-local-preview-fields">${suggestionRows}</div>` : ""}
+    ${aiStatus ? `<div class="retrieval-local-preview-fields">${aiStatus}</div>` : ""}
+    ${recommendationRows ? `<div class="retrieval-local-preview-issues">${recommendationRows}</div>` : ""}
+  </div>`;
+}
+
+function renderRetrievalFieldMapLab() {
+  const model = state.retrievalModelStatus || {};
+  const health = model.health || {};
+  const aiConfigured = model.configured === true;
+  const aiStatusKnown = Boolean(model.provider || state.retrievalModelStatusMessage);
+  const aiDisabled = state.retrievalFieldMapLabBusy || !aiConfigured;
+  const healthChecked = health.checked === true;
+  let aiStatusText = `AI Pixel off - set ${model.api_key_env || "AI_PIXEL_API_KEY"}`;
+  if (state.retrievalModelStatusBusy || !aiStatusKnown) {
+    aiStatusText = "AI Pixel checking";
+  } else if (healthChecked && health.ok) {
+    aiStatusText = `AI Pixel live - ${model.model || "model"} / ${Number(health.elapsed_ms || 0)} ms`;
+  } else if (healthChecked) {
+    aiStatusText = `AI Pixel check failed - ${health.error_kind || "error"}`;
+  } else if (aiConfigured) {
+    aiStatusText = `AI Pixel ready - ${model.model || "model"}`;
+  }
+  const aiStatusClass = aiConfigured && (!healthChecked || health.ok) ? "ok" : "warning";
+  const aiStatusTitle = health.error || health.message || state.retrievalModelStatusMessage || model.base_url || "";
+  const sourceOptions = [
+    ["localfile", "Local CSV/JSONL"],
+    ["httpjson", "HTTP JSON"],
+    ["sqlite", "SQLite"],
+    ["manifest", "Object Manifest"],
+  ].map(([value, label]) => `<option value="${value}" ${state.retrievalFieldMapLabSource === value ? "selected" : ""}>${label}</option>`).join("");
+  const modeOptions = [
+    ["columns", "Columns"],
+    ["samples", "JSON samples"],
+  ].map(([value, label]) => `<option value="${value}" ${state.retrievalFieldMapLabMode === value ? "selected" : ""}>${label}</option>`).join("");
+  const draftAvailable = Boolean(state.retrievalFieldMapLabResult?.config_draft && Object.keys(state.retrievalFieldMapLabResult.config_draft).length);
+  const inputPlaceholder = state.retrievalFieldMapLabMode === "samples"
+    ? '[{"paper_title":"AI4S Dataset","publication_year":"2026","doi":"10.6060/example"}]'
+    : "paper_title, publication_year, doi, authors, object_url";
+  return `<section class="retrieval-local-config retrieval-field-map-lab" data-retrieval-field-map-lab>
+    <div class="retrieval-source-config-head">
+      <div>
+        <span class="retrieval-config-kicker">字段映射</span>
+        <h3>字段名对不齐时，用这里生成 field_map</h3>
+        <p>把源里的列名或 JSON 样例粘贴进来，生成 title、date、doi、authors 等 Zotero 字段映射。</p>
+      </div>
+    </div>
+    <form data-retrieval-field-map-lab-form>
+      <div class="retrieval-field-map-lab-controls">
+        <label>
+          <span>源类型</span>
+          <select name="source_type" data-retrieval-field-map-lab-source>${sourceOptions}</select>
+        </label>
+        <label>
+          <span>输入格式</span>
+          <select name="input_mode" data-retrieval-field-map-lab-mode>${modeOptions}</select>
+        </label>
+        <label>
+          <span>AI</span>
+          <input type="checkbox" name="use_ai" data-retrieval-field-map-lab-ai ${state.retrievalFieldMapLabUseAi && aiConfigured ? "checked" : ""} ${aiDisabled ? "disabled" : ""}>
+        </label>
+      </div>
+      <p class="retrieval-source-message ${aiStatusClass}" data-retrieval-model-status title="${escapeHtml(aiStatusTitle)}">${escapeHtml(aiStatusText)}</p>
+      <label>
+        <span>列名或 JSON 样例</span>
+        <small>只需要粘贴少量样例；优先保证 title、date/year、doi、authors 能映射出来。</small>
+        <textarea name="input" rows="4" data-retrieval-field-map-lab-input placeholder="${escapeHtml(inputPlaceholder)}">${escapeHtml(state.retrievalFieldMapLabInput)}</textarea>
+      </label>
+      <label>
+        <span>可选：已有配置 JSON</span>
+        <small>如果已经写了一部分配置，可粘贴进来让系统只补 field_map。</small>
+        <textarea name="config" rows="4" data-retrieval-field-map-lab-config placeholder='{"label":"Draft source","field_map":{}}'>${escapeHtml(state.retrievalFieldMapLabConfig)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-model-status ${state.retrievalModelStatusBusy || !aiConfigured ? "disabled" : ""} title="检查 AI Pixel 接口">检查 AI</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-suggest-retrieval-field-map-lab ${state.retrievalFieldMapLabBusy ? "disabled" : ""} title="建议 field_map">${state.retrievalFieldMapLabBusy ? "..." : "生成映射"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-field-map-report data-report-format="markdown" ${state.retrievalFieldMapLabBusy ? "disabled" : ""} title="下载字段映射报告">报告</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-field-map-lab ${state.retrievalFieldMapLabBusy || !draftAvailable ? "disabled" : ""} title="套用 field_map 草稿">套用草稿</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-field-map-lab ${state.retrievalFieldMapLabBusy ? "disabled" : ""} title="清空字段映射实验室">清空</button>
+      </div>
+      ${state.retrievalFieldMapLabMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalFieldMapLabMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalFieldMapLabResult(state.retrievalFieldMapLabResult)}
+  </section>`;
+}
+
+function renderRetrievalLocalConfig() {
+  const info = state.retrievalSourceInfo.localfile || {};
+  const status = info.message || "";
+  return `<form class="retrieval-local-config" data-retrieval-local-paths-form>
+    <label>
+      <span>Local CSV/JSONL 路径</span>
+      <textarea name="paths" rows="2" data-retrieval-local-paths-input placeholder="C:\\data\\items.csv">${escapeHtml(state.retrievalLocalPaths)}</textarea>
+    </label>
+    <div class="retrieval-local-config-actions">
+      <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalLocalPathsBusy ? "disabled" : ""} title="保存本地检索路径">保存</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-local-paths ${state.retrievalLocalPathsBusy ? "disabled" : ""} title="清空本地检索路径">清空</button>
+      ${status ? `<em>${escapeHtml(status)}</em>` : ""}
+    </div>
+    ${state.retrievalLocalPathsMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalLocalPathsMessage)}</p>` : ""}
+  </form>`;
+}
+
+function renderRetrievalLocalConfigWithPreview() {
+  const info = state.retrievalSourceInfo.localfile || {};
+  const status = info.message || "";
+  return `<section class="retrieval-local-config retrieval-config-source" id="source-localfile-config">
+    ${renderRetrievalSourceConfigHeader(
+      "localfile",
+      "Local CSV/JSONL",
+      "适合已经在本机整理好的 CSV 或 JSONL 元数据文件。",
+      ["paths：一个或多个本地文件路径", "field_map：把源字段映射到 title / date / doi / authors 等字段"],
+      "保存后点“自动建议字段”或看预览；回到上方检索时勾选 Local。",
+    )}
+    <form data-retrieval-local-paths-form>
+      <label>
+        <span>1. 文件路径</span>
+        <small>每行一个文件路径；支持 CSV 和 JSONL。</small>
+        <textarea name="paths" rows="2" data-retrieval-local-paths-input placeholder="C:\\data\\items.csv">${escapeHtml(state.retrievalLocalPaths)}</textarea>
+      </label>
+      <label>
+        <span>2. 字段映射 field_map</span>
+        <small>左边是文库字段，右边是 CSV/JSONL 里的字段名。先不知道可点“自动建议字段”。</small>
+        <textarea name="field_map" rows="4" data-retrieval-local-field-map-input placeholder='{"title":"paper_title","date":"publication_year","doi":"doi","authors":"authors"}'>${escapeHtml(state.retrievalLocalFieldMap)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalLocalPathsBusy ? "disabled" : ""} title="保存本地源配置">保存配置</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-local-paths ${state.retrievalLocalPathsBusy ? "disabled" : ""} title="清空本地源配置">清空</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-suggest-retrieval-local-field-map ${state.retrievalLocalPreviewBusy ? "disabled" : ""} title="从样本自动建议 field_map">自动建议字段</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-configured-field-map="localfile" data-report-format="markdown" ${state.retrievalLocalPreviewBusy ? "disabled" : ""} title="下载本地源字段映射报告">字段报告</button>
+        ${status ? `<em>${escapeHtml(status)}</em>` : ""}
+      </div>
+      ${state.retrievalLocalPathsMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalLocalPathsMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalLocalPreview()}
+  </section>`;
+}
+
+function renderRetrievalHttpJsonConfig() {
+  const info = state.retrievalSourceInfo.httpjson || {};
+  const status = info.message || "";
+  const templateButtons = (state.retrievalHttpJsonTemplates || [])
+    .map((template) => `<button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-http-json-template="${escapeHtml(template.id || "")}" title="${escapeHtml(template.description || "Apply HTTP JSON template")}">${escapeHtml(template.label || template.id || "Template")}</button>`)
+    .join("");
+  const placeholder = `{
+  "label": "Internal API",
+  "url_template": "https://example.test/search?q={query}&limit={limit}&page={page}",
+  "items_path": "results",
+  "next_url_path": "links.next",
+  "max_pages": 3,
+  "auth": {
+    "type": "bearer_env",
+    "env": "INTERNAL_API_TOKEN"
+  },
+  "headers": {
+    "X-Team": "\${ENV:INTERNAL_TEAM}"
+  },
+  "field_map": {
+    "title": "title",
+    "date": "year",
+    "doi": "doi",
+    "abstract": "abstract",
+    "authors": "authors",
+    "url": "url",
+    "venue": "venue",
+    "item_type": "item_type",
+    "tags": "keywords",
+    "external_id": "id"
+  }
+}`;
+  return `<section class="retrieval-local-config retrieval-http-json-config retrieval-config-source" id="source-httpjson-config" data-retrieval-http-json-config>
+    ${renderRetrievalSourceConfigHeader(
+      "httpjson",
+      "HTTP JSON",
+      "适合内部检索接口、第三方 JSON API，或者任何能用 query 参数返回 JSON 列表的服务。",
+      ["url_template：检索接口，必须包含 {query}", "items_path：结果列表在 JSON 里的位置", "field_map：把结果字段映射到文库字段"],
+      "保存后点“预览样本”；确认能看到候选样本后，回到上方检索时勾选 HTTP。",
+    )}
+    <form data-retrieval-http-json-form>
+      <label>
+        <span>HTTP JSON 配置</span>
+        <small>最少写 url_template、items_path、field_map；需要鉴权时再加 auth 或 headers。</small>
+        <textarea name="config" rows="8" data-retrieval-http-json-input placeholder="${escapeHtml(placeholder)}">${escapeHtml(state.retrievalHttpJsonConfig)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalHttpJsonBusy ? "disabled" : ""} title="保存 HTTP JSON 配置">保存配置</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-http-json ${state.retrievalHttpJsonBusy ? "disabled" : ""} title="清空 HTTP JSON 配置">清空</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-suggest-retrieval-http-json-field-map ${state.retrievalHttpJsonBusy ? "disabled" : ""} title="从真实样本自动建议 HTTP JSON field_map">${state.retrievalHttpJsonBusy ? "..." : "自动建议字段"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-configured-field-map="httpjson" data-report-format="markdown" ${state.retrievalHttpJsonBusy ? "disabled" : ""} title="下载 HTTP JSON 字段映射报告">字段报告</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-http-json-preview ${state.retrievalHttpJsonPreviewBusy ? "disabled" : ""} title="预览 HTTP JSON 字段映射">${state.retrievalHttpJsonPreviewBusy ? "..." : "预览样本"}</button>
+        ${status ? `<em>${escapeHtml(status)}</em>` : ""}
+      </div>
+      ${templateButtons ? `<div class="retrieval-local-config-actions retrieval-http-json-templates"><em>模板：</em>${templateButtons}</div>` : ""}
+      ${state.retrievalHttpJsonMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalHttpJsonMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalHttpJsonPreview()}
+  </section>`;
+}
+
+function renderRetrievalHttpJsonPreview() {
+  const preview = state.retrievalHttpJsonPreview || {};
+  const samples = preview.samples || [];
+  const quality = preview.quality || {};
+  const score = Number(quality.score || 0);
+  const qualityLabel = quality.status ? `${quality.status} · ${Math.round(score * 100)}% coverage` : "";
+  const coverage = (quality.fields || [])
+    .map((field) => {
+      const percent = Math.round(Number(field.coverage || 0) * 100);
+      const issueClass = Number(field.missing_count || 0) ? (field.severity || "warning") : "ok";
+      return `<span class="${escapeHtml(issueClass)}" title="${escapeHtml(field.message || "")}">${escapeHtml(field.label || field.field || "")} <em>${percent}%</em></span>`;
+    })
+    .join("");
+  const recommendations = (quality.recommendations || [])
+    .map((message) => `<span>${escapeHtml(message)}</span>`)
+    .join("");
+  return `<div class="retrieval-local-preview retrieval-http-json-preview" data-retrieval-http-json-preview>
+    <div class="retrieval-local-preview-head">
+      <strong>HTTP JSON mapping preview</strong>
+      <span>${escapeHtml(preview.query ? `query: ${preview.query}` : "")}</span>
+    </div>
+    ${state.retrievalHttpJsonPreviewMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalHttpJsonPreviewMessage)}</p>` : ""}
+    ${qualityLabel ? `<div class="retrieval-local-preview-quality ${escapeHtml(quality.status || "")}">
+      <strong>${escapeHtml(qualityLabel)}</strong>
+      ${coverage ? `<div>${coverage}</div>` : ""}
+      ${recommendations ? `<small>${recommendations}</small>` : ""}
+    </div>` : ""}
+    ${samples.length ? `<div class="retrieval-local-preview-samples">
+      ${samples.map((sample) => renderRetrievalLocalPreviewSample(sample)).join("")}
+    </div>` : `<p class="retrieval-history-message">Save a valid HTTP JSON config, then preview how source results map into Zotero fields.</p>`}
+  </div>`;
+}
+
+function renderRetrievalSqliteConfig() {
+  const info = state.retrievalSourceInfo.sqlite || {};
+  const status = info.message || "";
+  const templateButtons = (state.retrievalSqliteTemplates || [])
+    .map((template) => `<button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-sqlite-template="${escapeHtml(template.id || "")}" title="${escapeHtml(template.description || "Apply SQLite template")}">${escapeHtml(template.label || template.id || "Template")}</button>`)
+    .join("");
+  const placeholder = `{
+  "label": "Internal SQLite",
+  "path": "C:/data/retrieval.sqlite",
+  "query": "SELECT id, title, year, doi, authors, abstract, keywords, url, venue, item_type FROM items WHERE title LIKE :like_query OR abstract LIKE :like_query LIMIT :limit",
+  "field_map": {
+    "title": "title",
+    "date": "year",
+    "doi": "doi",
+    "abstract": "abstract",
+    "authors": "authors",
+    "url": "url",
+    "venue": "venue",
+    "item_type": "item_type",
+    "tags": "keywords",
+    "external_id": "id"
+  }
+}`;
+  return `<section class="retrieval-local-config retrieval-sqlite-config retrieval-config-source" id="source-sqlite-config" data-retrieval-sqlite-config>
+    ${renderRetrievalSourceConfigHeader(
+      "sqlite",
+      "SQLite",
+      "适合本机 SQLite 数据库，尤其是已有结构化表、需要用 SQL 检索的元数据源。",
+      ["path：SQLite 文件路径", "query：带 :like_query 或 :query 的 SQL", "field_map：把 SQL 返回列映射到文库字段"],
+      "保存后点“预览样本”；确认 SQL 能返回样本后，回到上方检索时勾选 SQLite。",
+    )}
+    <form data-retrieval-sqlite-form>
+      <label>
+        <span>SQLite 配置</span>
+        <small>SQL 返回列名要和 field_map 右侧一致；建议先 LIMIT :limit。</small>
+        <textarea name="config" rows="8" data-retrieval-sqlite-input placeholder="${escapeHtml(placeholder)}">${escapeHtml(state.retrievalSqliteConfig)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalSqliteBusy ? "disabled" : ""} title="保存 SQLite 配置">保存配置</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-sqlite ${state.retrievalSqliteBusy ? "disabled" : ""} title="清空 SQLite 配置">清空</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-suggest-retrieval-sqlite-field-map ${state.retrievalSqliteBusy ? "disabled" : ""} title="从真实行自动建议 SQLite field_map">${state.retrievalSqliteBusy ? "..." : "自动建议字段"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-configured-field-map="sqlite" data-report-format="markdown" ${state.retrievalSqliteBusy ? "disabled" : ""} title="下载 SQLite 字段映射报告">字段报告</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-sqlite-preview ${state.retrievalSqlitePreviewBusy ? "disabled" : ""} title="预览 SQLite 字段映射">${state.retrievalSqlitePreviewBusy ? "..." : "预览样本"}</button>
+        ${status ? `<em>${escapeHtml(status)}</em>` : ""}
+      </div>
+      ${templateButtons ? `<div class="retrieval-local-config-actions retrieval-sqlite-templates"><em>模板：</em>${templateButtons}</div>` : ""}
+      ${state.retrievalSqliteMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSqliteMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalSqlitePreview()}
+  </section>`;
+}
+
+function renderRetrievalSqlitePreview() {
+  const preview = state.retrievalSqlitePreview || {};
+  const samples = preview.samples || [];
+  const quality = preview.quality || {};
+  const score = Number(quality.score || 0);
+  const qualityLabel = quality.status ? `${quality.status} · ${Math.round(score * 100)}% coverage` : "";
+  const coverage = (quality.fields || [])
+    .map((field) => {
+      const percent = Math.round(Number(field.coverage || 0) * 100);
+      const issueClass = Number(field.missing_count || 0) ? (field.severity || "warning") : "ok";
+      return `<span class="${escapeHtml(issueClass)}" title="${escapeHtml(field.message || "")}">${escapeHtml(field.label || field.field || "")} <em>${percent}%</em></span>`;
+    })
+    .join("");
+  const recommendations = (quality.recommendations || [])
+    .map((message) => `<span>${escapeHtml(message)}</span>`)
+    .join("");
+  return `<div class="retrieval-local-preview retrieval-sqlite-preview" data-retrieval-sqlite-preview>
+    <div class="retrieval-local-preview-head">
+      <strong>SQLite mapping preview</strong>
+      <span>${escapeHtml(preview.query ? `query: ${preview.query}` : "")}</span>
+    </div>
+    ${state.retrievalSqlitePreviewMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSqlitePreviewMessage)}</p>` : ""}
+    ${qualityLabel ? `<div class="retrieval-local-preview-quality ${escapeHtml(quality.status || "")}">
+      <strong>${escapeHtml(qualityLabel)}</strong>
+      ${coverage ? `<div>${coverage}</div>` : ""}
+      ${recommendations ? `<small>${recommendations}</small>` : ""}
+    </div>` : ""}
+    ${samples.length ? `<div class="retrieval-local-preview-samples">
+      ${samples.map((sample) => renderRetrievalLocalPreviewSample(sample)).join("")}
+    </div>` : `<p class="retrieval-history-message">Save a valid SQLite config, then preview how source rows map into Zotero fields.</p>`}
+  </div>`;
+}
+
+function renderRetrievalManifestConfig() {
+  const info = state.retrievalSourceInfo.manifest || {};
+  const status = info.message || "";
+  const templateButtons = (state.retrievalManifestTemplates || [])
+    .map((template) => `<button type="button" class="mini-icon retrieval-report-btn" data-apply-retrieval-manifest-template="${escapeHtml(template.id || "")}" title="${escapeHtml(template.description || "Apply object manifest template")}">${escapeHtml(template.label || template.id || "Template")}</button>`)
+    .join("");
+  const placeholder = `{
+  "label": "Object Manifest",
+  "manifest_path": "C:/data/object-manifest.json",
+  "items_path": "items",
+  "field_map": {
+    "title": "title",
+    "date": "year",
+    "doi": "doi",
+    "abstract": "abstract",
+    "authors": "authors",
+    "url": "object_url",
+    "pdf_url": "pdf_url",
+    "venue": "venue",
+    "item_type": "item_type",
+    "tags": "keywords",
+    "external_id": "id"
+  }
+}`;
+  return `<section class="retrieval-local-config retrieval-manifest-config retrieval-config-source" id="source-manifest-config" data-retrieval-manifest-config>
+    ${renderRetrievalSourceConfigHeader(
+      "manifest",
+      "Object Manifest",
+      "适合对象清单、附件清单、数据集索引这类 JSON manifest。",
+      ["manifest_path：清单文件路径", "items_path：条目数组在清单里的位置", "field_map：把清单字段映射到文库字段"],
+      "保存后点“预览样本”；确认能看到对象样本后，回到上方检索时勾选 Manifest。",
+    )}
+    <form data-retrieval-manifest-form>
+      <label>
+        <span>Object Manifest 配置</span>
+        <small>Manifest 通常用于把对象 URL、PDF URL、数据集文件等一起保存进文库条目。</small>
+        <textarea name="config" rows="8" data-retrieval-manifest-input placeholder="${escapeHtml(placeholder)}">${escapeHtml(state.retrievalManifestConfig)}</textarea>
+      </label>
+      <div class="retrieval-local-config-actions">
+        <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalManifestBusy ? "disabled" : ""} title="保存 Object Manifest 配置">保存配置</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-retrieval-manifest ${state.retrievalManifestBusy ? "disabled" : ""} title="清空 Object Manifest 配置">清空</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-suggest-retrieval-manifest-field-map ${state.retrievalManifestBusy ? "disabled" : ""} title="从真实对象自动建议 manifest field_map">${state.retrievalManifestBusy ? "..." : "自动建议字段"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-configured-field-map="manifest" data-report-format="markdown" ${state.retrievalManifestBusy ? "disabled" : ""} title="下载 Object Manifest 字段映射报告">字段报告</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-manifest-preview ${state.retrievalManifestPreviewBusy ? "disabled" : ""} title="预览 Object Manifest 字段映射">${state.retrievalManifestPreviewBusy ? "..." : "预览样本"}</button>
+        ${status ? `<em>${escapeHtml(status)}</em>` : ""}
+      </div>
+      ${templateButtons ? `<div class="retrieval-local-config-actions retrieval-manifest-templates"><em>模板：</em>${templateButtons}</div>` : ""}
+      ${state.retrievalManifestMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalManifestMessage)}</p>` : ""}
+    </form>
+    ${renderRetrievalManifestPreview()}
+  </section>`;
+}
+
+function renderRetrievalManifestPreview() {
+  const preview = state.retrievalManifestPreview || {};
+  const samples = preview.samples || [];
+  const quality = preview.quality || {};
+  const score = Number(quality.score || 0);
+  const qualityLabel = quality.status ? `${quality.status} · ${Math.round(score * 100)}% coverage` : "";
+  const coverage = (quality.fields || [])
+    .map((field) => {
+      const percent = Math.round(Number(field.coverage || 0) * 100);
+      const issueClass = Number(field.missing_count || 0) ? (field.severity || "warning") : "ok";
+      return `<span class="${escapeHtml(issueClass)}" title="${escapeHtml(field.message || "")}">${escapeHtml(field.label || field.field || "")} <em>${percent}%</em></span>`;
+    })
+    .join("");
+  const recommendations = (quality.recommendations || [])
+    .map((message) => `<span>${escapeHtml(message)}</span>`)
+    .join("");
+  return `<div class="retrieval-local-preview retrieval-manifest-preview" data-retrieval-manifest-preview>
+    <div class="retrieval-local-preview-head">
+      <strong>Object manifest mapping preview</strong>
+      <span>${escapeHtml(preview.query ? `query: ${preview.query}` : "")}</span>
+    </div>
+    ${state.retrievalManifestPreviewMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalManifestPreviewMessage)}</p>` : ""}
+    ${qualityLabel ? `<div class="retrieval-local-preview-quality ${escapeHtml(quality.status || "")}">
+      <strong>${escapeHtml(qualityLabel)}</strong>
+      ${coverage ? `<div>${coverage}</div>` : ""}
+      ${recommendations ? `<small>${recommendations}</small>` : ""}
+    </div>` : ""}
+    ${samples.length ? `<div class="retrieval-local-preview-samples">
+      ${samples.map((sample) => renderRetrievalLocalPreviewSample(sample)).join("")}
+    </div>` : `<p class="retrieval-history-message">Save a valid object manifest config, then preview how source objects map into Zotero fields.</p>`}
+  </div>`;
+}
+
+function renderRetrievalLocalPreview() {
+  const preview = state.retrievalLocalPreview || {};
+  const files = preview.files || [];
+  return `<div class="retrieval-local-preview" data-retrieval-local-preview>
+    <div class="retrieval-local-preview-head">
+      <strong>Local field mapping preview</strong>
+      <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-local-preview ${state.retrievalLocalPreviewBusy ? "disabled" : ""} title="Preview local field mapping">${state.retrievalLocalPreviewBusy ? "..." : "Preview"}</button>
+    </div>
+    ${state.retrievalLocalPreviewMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalLocalPreviewMessage)}</p>` : ""}
+    ${files.length ? `<div class="retrieval-local-preview-files">
+      ${files.map((file) => renderRetrievalLocalPreviewFile(file)).join("")}
+    </div>` : `<p class="retrieval-history-message">Save a valid local CSV/JSONL path, then preview how source columns map into Zotero fields.</p>`}
+  </div>`;
+}
+
+function renderRetrievalLocalPreviewFile(file) {
+  const rowText = `${file.truncated ? ">=" : ""}${file.row_count || 0} rows`;
+  const quality = file.quality || {};
+  const fieldMapSuggestion = file.field_map_suggestion || {};
+  const fieldMapCount = Number(fieldMapSuggestion.suggested_field_count || 0);
+  const fieldMapText = fieldMapCount ? `map ${fieldMapCount} / config` : "";
+  const score = Number(quality.score || 0);
+  const qualityLabel = quality.status ? `${quality.status} · ${Math.round(score * 100)}% coverage` : "";
+  const coverage = (quality.fields || [])
+    .map((field) => {
+      const percent = Math.round(Number(field.coverage || 0) * 100);
+      const issueClass = Number(field.missing_count || 0) ? (field.severity || "warning") : "ok";
+      return `<span class="${escapeHtml(issueClass)}" title="${escapeHtml(field.message || "")}">${escapeHtml(field.label || field.field || "")} <em>${percent}%</em></span>`;
+    })
+    .join("");
+  const recommendations = (quality.recommendations || [])
+    .map((message) => `<span>${escapeHtml(message)}</span>`)
+    .join("");
+  const mappings = (file.mappings || [])
+    .map((mapping) => `<span class="${mapping.target ? "" : "unmapped"}">${escapeHtml(mapping.column)} <em>${escapeHtml(mapping.label || "unmapped")}</em></span>`)
+    .join("");
+  const samples = (file.samples || []).map((sample) => renderRetrievalLocalPreviewSample(sample)).join("");
+  return `<article class="retrieval-local-preview-file">
+    <div class="retrieval-local-preview-file-head">
+      <strong>${escapeHtml(file.name || file.path || "local file")}</strong>
+      <span>${escapeHtml([file.format, rowText, fieldMapText].filter(Boolean).join(" / "))}</span>
+    </div>
+    <div class="retrieval-local-preview-quality ${escapeHtml(quality.status || "")}">
+      <strong>${escapeHtml(qualityLabel || "coverage pending")}</strong>
+      ${coverage ? `<div>${coverage}</div>` : ""}
+      ${recommendations ? `<small>${recommendations}</small>` : ""}
+    </div>
+    <div class="retrieval-local-preview-mappings">${mappings || `<span class="unmapped">No columns</span>`}</div>
+    <div class="retrieval-local-preview-samples">${samples || `<p class="retrieval-history-message">No sample rows.</p>`}</div>
+  </article>`;
+}
+
+function renderRetrievalLocalPreviewSample(sample) {
+  const item = sample.item || {};
+  const fields = item.fields || {};
+  const identifiers = item.identifiers || {};
+  const quality = sample.quality || {};
+  const issues = (quality.issues || [])
+    .map((issue) => `<span class="${escapeHtml(issue.severity || "warning")}">${escapeHtml(issue.message || issue.label || "")}</span>`)
+    .join("");
+  const creators = (item.creators || []).map((creator) => [creator.first_name, creator.last_name].filter(Boolean).join(" ")).filter(Boolean).join(" / ");
+  const tags = (item.tags || []).join(", ");
+  const fieldSummary = ["title", "date", "publicationTitle", "DOI", "url"]
+    .map((key) => fields[key] ? `<span><em>${escapeHtml(key)}</em>${escapeHtml(fields[key])}</span>` : "")
+    .join("");
+  const identifierSummary = Object.entries(identifiers)
+    .map(([key, value]) => `<span><em>${escapeHtml(key)}</em>${escapeHtml(value)}</span>`)
+    .join("");
+  return `<div class="retrieval-local-preview-sample">
+    <div class="retrieval-local-preview-sample-head">
+      <strong>#${escapeHtml(sample.row || "")} ${escapeHtml(fields.title || sample.title || "Untitled")}</strong>
+      <em>${escapeHtml([item.item_type || "item", quality.status ? `${quality.status} ${Math.round(Number(quality.score || 0) * 100)}%` : ""].filter(Boolean).join(" / "))}</em>
+    </div>
+    <div class="retrieval-local-preview-fields">${fieldSummary}${identifierSummary}</div>
+    ${issues ? `<div class="retrieval-local-preview-issues">${issues}</div>` : ""}
+    ${(creators || tags) ? `<small>${escapeHtml([creators, tags].filter(Boolean).join(" / "))}</small>` : ""}
+  </div>`;
+}
+
+function retrievalBatchIsActive(job) {
+  return ["queued", "running"].includes(String(job?.status || ""));
+}
+
+function formatRetrievalEta(seconds) {
+  const value = Number(seconds || 0);
+  if (!value) return "";
+  if (value < 60) return `ETA ${Math.max(1, Math.round(value))}s`;
+  const minutes = Math.floor(value / 60);
+  const remainder = Math.round(value % 60);
+  if (minutes < 60) return `ETA ${minutes}m${remainder ? ` ${remainder}s` : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return `ETA ${hours}h${minuteRemainder ? ` ${minuteRemainder}m` : ""}`;
+}
+
+function renderRetrievalBatchPanel() {
+  const rows = (state.retrievalBatchJobs || []).map((job) => renderRetrievalBatchRow(job)).join("");
+  const aiConfigured = state.retrievalModelStatus?.configured === true;
+  const aiDisabled = !aiConfigured || state.retrievalQueryPlanBusy || state.retrievalBatchBusy;
+  return `<section class="retrieval-batch" data-retrieval-batches>
+    <div class="retrieval-history-head">
+      <strong>Batch retrieval</strong>
+      <button type="button" class="mini-icon" data-refresh-retrieval-batches title="Refresh batch jobs">${state.retrievalBatchBusy ? "..." : "Refresh"}</button>
+    </div>
+    <form class="retrieval-batch-form" data-retrieval-batch-form>
+      <textarea name="queries" rows="3" data-retrieval-batch-queries placeholder="One query per line">${escapeHtml(state.retrievalBatchQueries)}</textarea>
+      <div class="retrieval-local-config-actions">
+        <label class="retrieval-inline-toggle" title="${aiConfigured ? "Use AI Pixel to refine PLAN queries" : "Set AI_PIXEL_API_KEY to enable AI PLAN"}">
+          <input type="checkbox" data-retrieval-query-plan-ai ${state.retrievalQueryPlanUseAi && aiConfigured ? "checked" : ""} ${aiDisabled ? "disabled" : ""}>
+          <span>AI</span>
+        </label>
+        <button type="button" class="mini-icon retrieval-report-btn" data-draft-retrieval-batch-queries ${state.retrievalBatchBusy || state.retrievalQueryPlanBusy ? "disabled" : ""} title="Draft validation queries from configured source previews">${state.retrievalQueryPlanBusy ? "..." : "PLAN"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-query-plan data-report-format="markdown" ${state.retrievalQueryPlanBusy ? "disabled" : ""} title="Download query plan report">PLAN RPT</button>
+        <button type="submit" class="mini-icon retrieval-report-btn" ${state.retrievalBatchBusy ? "disabled" : ""} title="Start batch retrieval">Start batch</button>
+      </div>
+    </form>
+    ${state.retrievalBatchMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalBatchMessage)}</p>` : ""}
+    <div class="retrieval-batch-list">${state.retrievalBatchBusy && !rows ? `<p class="retrieval-history-message">Loading...</p>` : rows || `<p class="retrieval-history-message">No batch jobs yet.</p>`}</div>
+  </section>`;
+}
+
+function renderRetrievalBatchRow(job) {
+  const total = Number(job.total_queries || 0);
+  const completed = Number(job.completed_queries || 0);
+  const failed = Number(job.failed_queries || 0);
+  const candidates = Number(job.total_candidates || 0);
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  const queries = (job.queries || []).slice(0, 3).join(" / ");
+  const active = retrievalBatchIsActive(job);
+  const paused = String(job.status || "") === "paused";
+  const remaining = Number(job.remaining_queries || 0);
+  const eta = formatRetrievalEta(job.eta_seconds);
+  const timing = [remaining ? `${remaining} remaining` : "", eta].filter(Boolean).join(" / ");
+  const canRetryFailed = failed > 0 && !active && !paused;
+  const actions = [
+    job.job_id ? `<button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-batch-report="${escapeHtml(job.job_id || "")}" data-report-format="markdown" ${state.retrievalBatchBusy ? "disabled" : ""} title="Download batch retrieval report">Report</button>` : "",
+    job.job_id ? `<button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-batch-report="${escapeHtml(job.job_id || "")}" data-report-format="csv" data-report-scope="sources" ${state.retrievalBatchBusy ? "disabled" : ""} title="Download source evidence CSV">SRC CSV</button>` : "",
+    active ? `<button type="button" class="mini-icon retrieval-report-btn" data-pause-retrieval-batch="${escapeHtml(job.job_id || "")}" ${state.retrievalBatchBusy ? "disabled" : ""} title="Pause batch retrieval">Pause</button>` : "",
+    paused ? `<button type="button" class="mini-icon retrieval-report-btn" data-resume-retrieval-batch="${escapeHtml(job.job_id || "")}" ${state.retrievalBatchBusy ? "disabled" : ""} title="Resume batch retrieval">Resume</button>` : "",
+    (active || paused) ? `<button type="button" class="mini-icon retrieval-report-btn" data-cancel-retrieval-batch="${escapeHtml(job.job_id || "")}" ${state.retrievalBatchBusy ? "disabled" : ""} title="Cancel batch retrieval">Cancel</button>` : "",
+    canRetryFailed ? `<button type="button" class="mini-icon retrieval-report-btn" data-retry-retrieval-batch="${escapeHtml(job.job_id || "")}" ${state.retrievalBatchBusy ? "disabled" : ""} title="Retry failed queries">Retry failed</button>` : "",
+  ].filter(Boolean).join("");
+  return `<article class="retrieval-batch-row ${active ? "active" : ""}" data-retrieval-batch-row="${escapeHtml(job.job_id || "")}">
+    <div class="retrieval-batch-main">
+      <strong>${escapeHtml(queries || job.job_id || "batch job")}</strong>
+      <span>${escapeHtml(job.status || "queued")} / ${completed}/${total} queries / ${candidates} candidates${failed ? ` / ${failed} failed` : ""}</span>
+      ${timing ? `<span>${escapeHtml(timing)}</span>` : ""}
+    </div>
+    ${actions ? `<div class="retrieval-batch-actions">${actions}</div>` : ""}
+    <div class="retrieval-batch-progress"><span style="width:${percent}%"></span></div>
+    ${(job.items || []).length ? `<div class="retrieval-batch-items">
+      ${job.items.map((item) => `<span class="${escapeHtml(item.status || "")}" title="${escapeHtml(item.error || item.run_id || "")}">${escapeHtml(item.query || "")}${item.run_id ? ` / ${escapeHtml(item.run_id)}` : ""}</span>`).join("")}
+    </div>` : ""}
+  </article>`;
+}
+
+const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
+  {
+    title: "论文文献",
+    tag: "Paper",
+    description: "期刊、会议、论文 DOI 和学术图谱。",
+    defaultOpen: true,
+    sources: [
+      ["crossref", "Crossref", "论文 DOI"],
+      ["semanticscholar", "Semantic Scholar", "论文补充"],
+      ["openalex", "OpenAlex", "开放学术图谱"],
+    ],
+  },
+  {
+    title: "预印本",
+    tag: "Preprint",
+    description: "arXiv、bioRxiv、medRxiv 等预发表论文。",
+    defaultOpen: true,
+    sources: [
+      ["arxiv", "arXiv", "通用预印本"],
+      ["biorxiv", "bioRxiv", "生命科学预印本"],
+      ["medrxiv", "medRxiv", "医学预印本"],
+    ],
+  },
+  {
+    title: "领域数据库",
+    tag: "Domain",
+    description: "生命科学、天文物理等专业来源。",
+    defaultOpen: true,
+    sources: [
+      ["pubmed", "PubMed", "生命科学/医学"],
+      ["ads", "NASA ADS", "天文/物理"],
+    ],
+  },
+  {
+    title: "数据集 / 软件 / 代码对象",
+    tag: "Data & Code",
+    description: "数据集 DOI、软件 DOI、代码包和对象清单。",
+    defaultOpen: true,
+    sources: [
+      ["datacite", "DataCite", "数据/软件 DOI"],
+      ["github", "GitHub", "代码仓库"],
+      ["huggingface", "HuggingFace", "模型/数据集"],
+      ["zenodo", "Zenodo", "软件/数据/报告 DOI"],
+      ["manifest", "Manifest", "代码包/对象清单"],
+    ],
+  },
+  {
+    title: "本地 / 内部系统",
+    tag: "Internal",
+    description: "本地文件、内部 API、SQLite 元数据表。",
+    defaultOpen: false,
+    sources: [
+      ["localfile", "Local", "本地 CSV/JSONL"],
+      ["httpjson", "HTTP", "内部接口"],
+      ["sqlite", "SQLite", "本地库"],
+    ],
+  },
+  {
+    title: "图书 / 其他资料",
+    tag: "Books",
+    description: "图书、章节或其他非论文资料。",
+    defaultOpen: false,
+    sources: [
+      ["openlibrary", "OpenLibrary", "图书元数据"],
+    ],
+  },
+];
+
+function renderSimpleRetrievalSourceOption(name, fallbackLabel, hint) {
+  const info = state.retrievalSourceInfo[name] || {};
+  const label = info.label || fallbackLabel;
+  const unavailable = info.available === false;
+  const checked = !unavailable && state.retrievalSources.has(name);
+  const health = info.health || null;
+  const healthText = health ? (health.ok ? `健康 ${health.elapsed_ms || 0}ms` : `${health.error_kind || "异常"}：${health.action || health.error || ""}`) : "";
+  const rateText = formatRateLimitSeconds(info.rate_limit_seconds);
+  const setupText = retrievalSourceSetupText(info);
+  const detail = [info.message || "", rateText, healthText, setupText].filter(Boolean).join("；");
+  const classes = [
+    "simple-source-option",
+    unavailable ? "unavailable" : "",
+    health && health.ok === false ? "warning" : "",
+  ].filter(Boolean).join(" ");
+  return `<label class="${classes}" title="${escapeHtml(detail)}">
+    <input type="checkbox" name="sources" value="${escapeHtml(name)}" ${checked ? "checked" : ""} ${unavailable ? "disabled" : ""}>
+    <span>
+      <strong>${escapeHtml(label)}</strong>
+      <em>${escapeHtml(detail || hint || "可检索")}</em>
+    </span>
+  </label>`;
+}
+
+function renderSimpleRetrievalSourceGroup(options) {
+  return `<div class="simple-source-grid">
+    ${options.map(([name, label, hint]) => renderSimpleRetrievalSourceOption(name, label, hint)).join("")}
+  </div>`;
+}
+
+function renderSimpleRetrievalSourceCategory(category) {
+  const body = `<article class="simple-source-category">
+    <div class="simple-source-category-head">
+      <div>
+        <strong>${escapeHtml(category.title)}</strong>
+        <span>${escapeHtml(category.description)}</span>
+      </div>
+      <em>${escapeHtml(category.tag)}</em>
+    </div>
+    ${renderSimpleRetrievalSourceGroup(category.sources)}
+  </article>`;
+  if (category.defaultOpen) return body;
+  return `<details class="simple-source-category collapsed">
+    <summary>
+      <span>${escapeHtml(category.title)}</span>
+      <em>${escapeHtml(category.description)}</em>
+    </summary>
+    ${renderSimpleRetrievalSourceGroup(category.sources)}
+  </details>`;
+}
+
+function currentSimplePlanBatchJob() {
+  const jobId = String(state.simplePlanBatchJobId || "").trim();
+  if (!jobId) return null;
+  return (state.retrievalBatchJobs || []).find((job) => String(job.job_id || "") === jobId) || null;
+}
+
+function simplePlanRecommendedSources() {
+  const selected = new Set(currentRetrievalSourceSelection());
+  const recommended = [];
+  const queries = Array.isArray(state.retrievalQueryPlan?.queries) ? state.retrievalQueryPlan.queries : [];
+  queries.forEach((item) => {
+    (item.sources || []).forEach((source) => {
+      const cleanSource = String(source || "").trim().toLowerCase();
+      if (cleanSource && selected.has(cleanSource) && !recommended.includes(cleanSource)) {
+        recommended.push(cleanSource);
+      }
+    });
+  });
+  return recommended;
+}
+
+function simplePlanBatchSourceSelection() {
+  const recommended = simplePlanRecommendedSources();
+  const selected = currentRetrievalSourceSelection();
+  const sourceNames = recommended.length ? recommended : selected;
+  return {
+    recommended: recommended.length > 0,
+    selected: sourceNames,
+    unavailable: unavailableRetrievalSources(sourceNames),
+    available: availableRetrievalSources(sourceNames),
+  };
+}
+
+function currentSimpleBatchLimit() {
+  const value = Number(state.retrievalSimpleBatchLimit || 5);
+  return Math.max(1, Math.min(Number.isFinite(value) ? Math.round(value) : 5, 20));
+}
+
+function currentSimpleBatchLimitFromInput(value) {
+  const numeric = Number(value || 5);
+  return Math.max(1, Math.min(Number.isFinite(numeric) ? Math.round(numeric) : 5, 20));
+}
+
+function currentSimpleSourceLimit(source) {
+  const limits = state.retrievalSimpleSourceLimits || {};
+  const key = String(source || "").trim().toLowerCase();
+  return currentSimpleBatchLimitFromInput(limits[key] || state.retrievalSimpleBatchLimit || 5);
+}
+
+function simplePlanBatchSourceLimits(sources) {
+  const limits = {};
+  (sources || []).forEach((source) => {
+    const key = String(source || "").trim().toLowerCase();
+    if (key) limits[key] = currentSimpleSourceLimit(key);
+  });
+  return limits;
+}
+
+function renderSimplePlanSourceLimits() {
+  const sourceSelection = simplePlanBatchSourceSelection();
+  const sources = sourceSelection.selected;
+  if (!sources.length) return "";
+  return `<div class="simple-plan-source-limits">
+    <div>
+      <strong>每个源取多少条</strong>
+      <span>数量越小越快；论文源可稍大，代码/模型/数据源建议小一点。</span>
+    </div>
+    <div class="simple-plan-source-limit-grid">
+      ${sources.map((source) => {
+        const unavailable = unavailableRetrievalSources([source]).length > 0;
+        return `<label class="${unavailable ? "unavailable" : ""}">
+          <span>${escapeHtml(retrievalSourceLabel(source))}</span>
+          <input type="number" min="1" max="20" step="1" data-simple-source-limit="${escapeHtml(source)}" value="${currentSimpleSourceLimit(source)}" ${unavailable ? "disabled" : ""}>
+        </label>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function renderSimplePlanBatchStatus() {
+  const job = currentSimplePlanBatchJob();
+  if (!job) return "";
+  const total = Number(job.total_queries || 0);
+  const completed = Number(job.completed_queries || 0);
+  const failed = Number(job.failed_queries || 0);
+  const candidates = Number(job.total_candidates || 0);
+  const percent = total ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
+  const status = String(job.status || "queued");
+  const active = retrievalBatchIsActive(job);
+  const eta = formatRetrievalEta(job.eta_seconds);
+  const statusText = active
+    ? `正在按计划检索：${completed}/${total}`
+    : status === "completed"
+      ? `批量检索完成：${completed}/${total}`
+      : `批量检索${status}：${completed}/${total}`;
+  const note = active
+    ? "页面会自动刷新进度；完成后会把合并候选显示到下方候选结果。"
+    : "批量结果已进入下方候选结果；如果没有显示，可点右侧重新加载。";
+  const loadButton = !active && candidates
+    ? `<button type="button" class="mini-icon retrieval-report-btn" data-load-simple-batch-candidates="${escapeHtml(job.job_id || "")}" ${state.simplePlanBatchCandidatesBusy ? "disabled" : ""}>${state.simplePlanBatchCandidatesBusy ? "加载中..." : "查看批量结果"}</button>`
+    : "";
+  const items = (job.items || []).slice(0, 5).map((item) => {
+    const itemStatus = String(item.status || "");
+    const itemCandidateCount = Number(item.candidate_count || 0);
+    const suffix = [
+      itemStatus || "queued",
+      itemCandidateCount ? `${itemCandidateCount} 条候选` : "",
+      item.error ? "有错误" : "",
+    ].filter(Boolean).join(" / ");
+    return `<span class="${escapeHtml(itemStatus)}" title="${escapeHtml(item.error || item.run_id || "")}">
+      <strong>${escapeHtml(item.query || "")}</strong>
+      <em>${escapeHtml(suffix)}</em>
+    </span>`;
+  }).join("");
+  return `<div class="simple-plan-batch-status" data-simple-plan-batch-status>
+    <div class="simple-plan-batch-status-head">
+      <div>
+        <strong>${escapeHtml(statusText)}</strong>
+        <span>${candidates} 条候选${failed ? `，${failed} 条失败` : ""}${eta ? `，${eta}` : ""}</span>
+      </div>
+      ${loadButton}
+    </div>
+    <div class="retrieval-batch-progress" aria-hidden="true"><span style="width:${percent}%"></span></div>
+    <p>${escapeHtml(note)}</p>
+    ${items ? `<div class="simple-plan-batch-items">${items}</div>` : ""}
+  </div>`;
+}
+
+function renderSimpleAiQueryPlan() {
+  const plan = state.retrievalQueryPlan || null;
+  const queries = Array.isArray(plan?.queries) ? plan.queries : [];
+  const aiConfigured = state.retrievalModelStatus?.configured === true;
+  const statusText = aiConfigured ? "模型已配置，会请求 AI 生成 3-5 条相关检索式。" : "模型未配置时只能生成规则计划；请先到 API 配置页填写模型 key。";
+  const batchJob = currentSimplePlanBatchJob();
+  const batchActive = retrievalBatchIsActive(batchJob);
+  const batchButtonDisabled = state.retrievalBatchBusy || state.simplePlanBatchCandidatesBusy || batchActive;
+  const batchButtonText = batchActive ? "批量检索中..." : "按计划批量检索";
+  return `<section class="simple-ai-plan">
+    <div class="simple-ai-plan-head">
+      <div>
+        <strong>计划检索</strong>
+        <span>${escapeHtml(statusText)}</span>
+      </div>
+      <div class="simple-result-tools">
+        <button type="button" class="mini-icon retrieval-report-btn" data-simple-ai-query-plan ${state.retrievalQueryPlanBusy ? "disabled" : ""}>${state.retrievalQueryPlanBusy ? "生成中..." : "生成计划"}</button>
+        ${queries.length ? `<button type="button" class="mini-icon retrieval-report-btn" data-simple-plan-batch ${batchButtonDisabled ? "disabled" : ""}>${batchButtonText}</button>` : ""}
+      </div>
+    </div>
+    ${state.retrievalBatchMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalBatchMessage)}</p>` : ""}
+    ${queries.length ? renderSimplePlanSourceLimits() : ""}
+    ${renderSimplePlanBatchStatus()}
+    ${queries.length ? `<div class="simple-ai-plan-list">
+      ${queries.map((item, index) => `<article>
+        <em>${index + 1}</em>
+        <div>
+          <strong>${escapeHtml(item.query || "")}</strong>
+          <span>${escapeHtml(item.model_reason || item.reason || "用于覆盖不同数据源表达方式")}</span>
+          ${(item.sources || []).length ? `<small>推荐源：${escapeHtml((item.sources || []).join(" / "))}</small>` : ""}
+        </div>
+      </article>`).join("")}
+    </div>` : `<div class="simple-result-placeholder">先在上方直接输入关键词，再点“生成计划”。计划检索适合扩大覆盖面，结果也会显示到下方候选区。</div>`}
+  </section>`;
+}
+
+function renderSimpleRetrievalMain() {
+  const selectedCount = selectedRetrievalCandidates().length;
+  const candidateCount = state.retrievalCandidates.length;
+  const aiRecommendedCount = state.retrievalCandidates.filter((candidate) => {
+    return String(candidate.ai_evaluation?.decision || "").toLowerCase() === "recommend";
+  }).length;
+  const candidateHtml = renderRetrievalCandidates();
+  return `
+    <section class="simple-retrieval-guide" aria-label="三步使用流程">
+      <div>
+        <strong>1. 搜索</strong>
+        <span>输入关键词，默认源先跑一遍。</span>
+      </div>
+      <div>
+        <strong>2. 勾选</strong>
+        <span>看候选标题和来源，选需要入库的条目。</span>
+      </div>
+      <div>
+        <strong>3. 入库/报告</strong>
+        <span>导入所选，必要时下载汇总报告。</span>
+      </div>
+    </section>
+
+    <form class="add-item-form simple-search-form retrieval-search-form" data-retrieval-search-form>
+      <div class="simple-section-title">
+        <strong>直接检索</strong>
+        <span>只用当前关键词跑一次，速度最快；结果马上显示到下方候选区。</span>
+      </div>
+      <label class="simple-query-box">
+        <span>要找什么资料？</span>
+        <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 AI for Science graph neural network">
+      </label>
+
+      <div class="simple-source-head">
+        <div>
+          <strong>选择异构数据源</strong>
+          <span>按资料对象分类：论文、预印本、领域库、数据/代码、本地系统。</span>
+        </div>
+        <button type="button" class="mini-icon" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
+      </div>
+      <div class="simple-source-categories">
+        ${SIMPLE_RETRIEVAL_SOURCE_CATEGORIES.map(renderSimpleRetrievalSourceCategory).join("")}
+      </div>
+
+      ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
+      <div class="simple-search-actions">
+        <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "开始检索"}</button>
+        <span>直接检索不会入库，只把候选放到下面。</span>
+      </div>
+    </form>
+
+    ${renderSimpleAiQueryPlan()}
+
+    <section class="simple-results-panel" aria-label="检索结果">
+      <div class="simple-results-head">
+        <div>
+          <strong>候选结果</strong>
+          <span>勾选后点击导入所选。</span>
+        </div>
+        ${candidateCount ? `<div class="simple-result-tools">
+          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="ai" ${aiRecommendedCount ? "" : "disabled"}>全选 AI 推荐${aiRecommendedCount ? ` (${aiRecommendedCount})` : ""}</button>
+          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="all">全选候选</button>
+          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="none">清空选择</button>
+        </div>` : ""}
+      </div>
+      ${renderRetrievalStats()}
+      ${renderRetrievalAiSummary()}
+      ${candidateHtml || `<div class="simple-result-placeholder">直接检索或计划检索完成后，这里会显示候选条目和 AI 推荐。</div>`}
+      <div class="retrieval-actions simple-import-actions">
+        <span>已选择 ${selectedCount} 条</span>
+        <button type="button" class="form-action-btn" data-import-retrieval-selected ${state.addItemBusy || !selectedCount ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入所选"}</button>
+      </div>
+    </section>
+
+    <section class="simple-report-bar" aria-label="常用报告">
+      <div>
+        <strong>常用检查和报告</strong>
+        <span>报告基于最近检索记录；更完整的记录在高级区。</span>
+      </div>
+      <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-runs title="刷新最近检索">刷新记录</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="markdown" title="下载阶段 Markdown 汇总">下载汇总</button>
+      <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-readiness title="检查内部源是否可交接">${state.retrievalReadinessBusy ? "检查中..." : "检查数据源"}</button>
+    </section>
+  `;
+}
+
+function renderRetrievalPanel() {
+  const selectedCount = selectedRetrievalCandidates().length;
+  const sourceOptions = [
+    ["crossref", "Crossref"],
+    ["arxiv", "arXiv"],
+    ["pubmed", "PubMed"],
+    ["biorxiv", "bioRxiv"],
+    ["medrxiv", "medRxiv"],
+    ["semanticscholar", "Semantic Scholar"],
+    ["datacite", "DataCite"],
+    ["github", "GitHub"],
+    ["huggingface", "HuggingFace"],
+    ["zenodo", "Zenodo"],
+    ["openlibrary", "OpenLibrary"],
+    ["ads", "NASA ADS"],
+    ["localfile", "Local CSV/JSONL"],
+    ["httpjson", "HTTP JSON"],
+    ["sqlite", "SQLite"],
+    ["manifest", "Object Manifest"],
+    ["openalex", "OpenAlex"],
+  ].map(([name, label]) => renderRetrievalSourceOption(name, label)).join("");
+  return `
+    <form class="add-item-form retrieval-search-form" data-retrieval-search-form>
+      <label>
+        <span>关键词</span>
+        <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 vision language action robot manipulation">
+      </label>
+      <div class="retrieval-source-row">
+        ${sourceOptions}
+        <button type="button" class="mini-icon" data-check-retrieval-sources title="检查数据源健康">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-setup-retrieval-rehearsal title="Generate and configure rehearsal internal sources">DEMO KIT</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-validate-retrieval-rehearsal title="Generate rehearsal sources and start validation batch">${state.retrievalBatchBusy ? "..." : "DEMO RUN"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-source-setup data-report-format="markdown" title="下载源配置 Markdown 报告">SETUP</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-readiness title="Run internal source readiness preflight">${state.retrievalReadinessBusy ? "..." : "READY"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-readiness data-report-format="markdown" title="Download readiness Markdown report">RPT</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-tuning data-report-format="markdown" title="下载限流调优 Markdown 报告">TUNE</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-onboarding title="Check onboarding handoff status">${state.retrievalOnboardingBusy ? "..." : "ONB CHECK"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn"
+          data-download-retrieval-onboarding data-report-format="markdown"
+          title="下载多源检索接入验收报告">ONB</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-onboarding-package title="Download onboarding handoff ZIP">ONB ZIP</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-config-bundle title="下载脱敏检索源配置包">CFG</button>
+      </div>
+      ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
+      <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "检索候选"}</button>
+    </form>
+    ${renderRetrievalReadiness()}
+    ${renderRetrievalOnboarding()}
+    ${renderRetrievalConfigBundleImport()}
+    ${renderRetrievalSourceIntake()}
+    ${renderRetrievalFieldMapLab()}
+    ${renderRetrievalLocalConfigWithPreview()}
+    ${renderRetrievalHttpJsonConfig()}
+    ${renderRetrievalSqliteConfig()}
+    ${renderRetrievalManifestConfig()}
+    ${renderRetrievalStats()}
+    ${renderRetrievalCandidates()}
+    <div class="retrieval-actions">
+      <span>已选择 ${selectedCount} 条</span>
+      <button type="button" class="form-action-btn" data-import-retrieval-selected ${state.addItemBusy || !selectedCount ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入所选"}</button>
+    </div>
+    ${renderRetrievalBatchPanel()}
+    ${renderRetrievalSummary()}
+    ${renderRetrievalRuns()}
+  `;
+}
+
 function renderAddItemModal() {
   const panel = document.querySelector("[data-add-item-modal]");
-  if (!panel) return;
+  if (!panel) {
+    renderRetrievalPage();
+    return;
+  }
+  if (!["identifier", "text"].includes(state.addItemMode)) state.addItemMode = "identifier";
   const isIdentifier = state.addItemMode === "identifier";
+  const isText = state.addItemMode === "text";
   panel.innerHTML = `
     <section class="floating-card add-item-card" data-add-item-card>
       <div class="pane-head">
@@ -372,7 +2479,7 @@ function renderAddItemModal() {
       </div>
       <div class="add-item-tabs">
         <button type="button" class="${isIdentifier ? "active" : ""}" data-add-item-mode="identifier">标识符</button>
-        <button type="button" class="${!isIdentifier ? "active" : ""}" data-add-item-mode="text">引用文本</button>
+        <button type="button" class="${isText ? "active" : ""}" data-add-item-mode="text">引用文本</button>
       </div>
       ${isIdentifier ? `
         <form class="add-item-form" data-import-identifier-form>
@@ -382,7 +2489,7 @@ function renderAddItemModal() {
           </label>
           <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入条目"}</button>
         </form>
-      ` : `
+      ` : isText ? `
         <form class="add-item-form" data-import-text-form>
           <label>
             <span>格式</span>
@@ -400,7 +2507,7 @@ function renderAddItemModal() {
           </label>
           <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入引用文本"}</button>
         </form>
-      `}
+      ` : ""}
       ${state.addItemMessage ? `<p class="import-message" data-import-message>${escapeHtml(state.addItemMessage)}</p>` : ""}
       ${renderAddItemResults()}
     </section>
@@ -414,6 +2521,144 @@ function renderAddItemModal() {
   panel.querySelector("[data-close-add-item]")?.addEventListener("click", closeAddItemModal);
   panel.querySelector("[data-import-identifier-form]")?.addEventListener("submit", submitIdentifierImport);
   panel.querySelector("[data-import-text-form]")?.addEventListener("submit", submitTextImport);
+  panel.querySelector("[data-retrieval-search-form]")?.addEventListener("submit", submitRetrievalSearch);
+  panel.querySelector("[data-retrieval-local-paths-form]")?.addEventListener("submit", saveRetrievalLocalPaths);
+  panel.querySelector("[data-clear-retrieval-local-paths]")?.addEventListener("click", clearRetrievalLocalPaths);
+  panel.querySelector("[data-suggest-retrieval-local-field-map]")?.addEventListener("click", () => suggestRetrievalLocalFieldMap());
+  panel.querySelectorAll("[data-download-retrieval-configured-field-map]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalConfiguredFieldMapReport(button.dataset.downloadRetrievalConfiguredFieldMap, button.dataset.reportFormat));
+  });
+  panel.querySelector("[data-refresh-retrieval-local-preview]")?.addEventListener("click", () => loadRetrievalLocalPreview());
+  panel.querySelectorAll("[data-apply-retrieval-readiness-field-map]").forEach((button) => {
+    button.addEventListener("click", () => applyRetrievalReadinessFieldMapSuggestionToConfig(button.dataset.applyRetrievalReadinessFieldMap));
+  });
+  panel.querySelector("[data-retrieval-http-json-form]")?.addEventListener("submit", saveRetrievalHttpJsonConfig);
+  panel.querySelector("[data-clear-retrieval-http-json]")?.addEventListener("click", clearRetrievalHttpJsonConfig);
+  panel.querySelector("[data-suggest-retrieval-http-json-field-map]")?.addEventListener("click", () => suggestRetrievalHttpJsonFieldMap());
+  panel.querySelector("[data-refresh-retrieval-http-json-preview]")?.addEventListener("click", () => loadRetrievalHttpJsonPreview());
+  panel.querySelectorAll("[data-apply-retrieval-http-json-template]").forEach((button) => {
+    button.addEventListener("click", () => applyRetrievalHttpJsonTemplate(button.dataset.applyRetrievalHttpJsonTemplate));
+  });
+  panel.querySelector("[data-retrieval-sqlite-form]")?.addEventListener("submit", saveRetrievalSqliteConfig);
+  panel.querySelector("[data-clear-retrieval-sqlite]")?.addEventListener("click", clearRetrievalSqliteConfig);
+  panel.querySelector("[data-suggest-retrieval-sqlite-field-map]")?.addEventListener("click", () => suggestRetrievalSqliteFieldMap());
+  panel.querySelector("[data-refresh-retrieval-sqlite-preview]")?.addEventListener("click", () => loadRetrievalSqlitePreview());
+  panel.querySelectorAll("[data-apply-retrieval-sqlite-template]").forEach((button) => {
+    button.addEventListener("click", () => applyRetrievalSqliteTemplate(button.dataset.applyRetrievalSqliteTemplate));
+  });
+  panel.querySelector("[data-retrieval-manifest-form]")?.addEventListener("submit", saveRetrievalManifestConfig);
+  panel.querySelector("[data-clear-retrieval-manifest]")?.addEventListener("click", clearRetrievalManifestConfig);
+  panel.querySelector("[data-suggest-retrieval-manifest-field-map]")?.addEventListener("click", () => suggestRetrievalManifestFieldMap());
+  panel.querySelector("[data-refresh-retrieval-manifest-preview]")?.addEventListener("click", () => loadRetrievalManifestPreview());
+  panel.querySelectorAll("[data-apply-retrieval-manifest-template]").forEach((button) => {
+    button.addEventListener("click", () => applyRetrievalManifestTemplate(button.dataset.applyRetrievalManifestTemplate));
+  });
+  panel.querySelector("[data-retrieval-batch-form]")?.addEventListener("submit", submitRetrievalBatch);
+  panel.querySelector("[data-draft-retrieval-batch-queries]")?.addEventListener("click", draftRetrievalBatchQueries);
+  panel.querySelector("[data-retrieval-query-plan-ai]")?.addEventListener("change", (event) => {
+    state.retrievalQueryPlanUseAi = Boolean(event.currentTarget.checked);
+    state.retrievalQueryPlan = null;
+    renderAddItemModal();
+  });
+  panel.querySelectorAll("[data-download-retrieval-query-plan]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalQueryPlanReport(button.dataset.reportFormat));
+  });
+  panel.querySelector("[data-refresh-retrieval-batches]")?.addEventListener("click", () => loadRetrievalBatchJobs());
+  panel.querySelectorAll("[data-pause-retrieval-batch]").forEach((button) => button.addEventListener("click", () => pauseRetrievalBatch(button.dataset.pauseRetrievalBatch)));
+  panel.querySelectorAll("[data-resume-retrieval-batch]").forEach((button) => button.addEventListener("click", () => resumeRetrievalBatch(button.dataset.resumeRetrievalBatch)));
+  panel.querySelectorAll("[data-cancel-retrieval-batch]").forEach((button) => button.addEventListener("click", () => cancelRetrievalBatch(button.dataset.cancelRetrievalBatch)));
+  panel.querySelectorAll("[data-retry-retrieval-batch]").forEach((button) => button.addEventListener("click", () => retryRetrievalBatchFailures(button.dataset.retryRetrievalBatch)));
+  panel.querySelectorAll("[data-download-retrieval-batch-report]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalBatchReport(
+      button.dataset.downloadRetrievalBatchReport,
+      button.dataset.reportFormat,
+      button.dataset.reportScope,
+    ));
+  });
+  panel.querySelectorAll("[data-run-retrieval-remediation]").forEach((button) => {
+    button.addEventListener("click", () => runRetrievalBatchRemediation(button.dataset.runRetrievalRemediation));
+  });
+  panel.querySelector("[data-import-retrieval-selected]")?.addEventListener("click", submitRetrievalImport);
+  panel.querySelector("[data-refresh-retrieval-runs]")?.addEventListener("click", () => loadRetrievalRuns());
+  panel.querySelector("[data-check-retrieval-sources]")?.addEventListener("click", () => loadRetrievalSources({ check: true }));
+  panel.querySelector("[data-setup-retrieval-rehearsal]")?.addEventListener("click", setupRetrievalRehearsalKit);
+  panel.querySelector("[data-validate-retrieval-rehearsal]")?.addEventListener("click", validateRetrievalRehearsalRun);
+  panel.querySelector("[data-check-retrieval-readiness]")?.addEventListener("click", () => loadRetrievalReadiness());
+  panel.querySelectorAll("[data-download-retrieval-report]").forEach((button) => button.addEventListener("click", () => downloadRetrievalReport(button.dataset.downloadRetrievalReport, button.dataset.reportFormat)));
+  panel.querySelectorAll("[data-download-retrieval-summary]").forEach((button) => button.addEventListener("click", () => downloadRetrievalSummaryReport(button.dataset.reportFormat)));
+  panel.querySelectorAll("[data-download-retrieval-source-setup]").forEach((button) => button.addEventListener("click", () => downloadRetrievalSourceSetupReport(button.dataset.reportFormat)));
+  panel.querySelectorAll("[data-download-retrieval-readiness]").forEach((button) => button.addEventListener("click", () => downloadRetrievalReadinessReport(button.dataset.reportFormat)));
+  panel.querySelectorAll("[data-download-retrieval-tuning]").forEach((button) => button.addEventListener("click", () => downloadRetrievalTuningReport(button.dataset.reportFormat)));
+  panel.querySelector("[data-check-retrieval-onboarding]")?.addEventListener("click", () => loadRetrievalOnboarding());
+  panel.querySelectorAll("[data-download-retrieval-onboarding]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalOnboardingReport(button.dataset.reportFormat));
+  });
+  panel.querySelector("[data-download-retrieval-onboarding-package]")?.addEventListener("click", downloadRetrievalOnboardingPackage);
+  panel.querySelectorAll("[data-download-retrieval-gate-artifact]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalGateArtifact(button.dataset.downloadRetrievalGateArtifact));
+  });
+  panel.querySelectorAll("[data-download-retrieval-config-bundle]").forEach((button) => button.addEventListener("click", () => downloadRetrievalConfigBundle()));
+  panel.querySelector("[data-retrieval-config-bundle-input]")?.addEventListener("input", (event) => {
+    state.retrievalConfigBundleText = event.currentTarget.value;
+    state.retrievalConfigBundleResult = null;
+  });
+  panel.querySelector("[data-dry-run-retrieval-config-bundle]")?.addEventListener("click", () => dryRunRetrievalConfigBundleImport());
+  panel.querySelector("[data-import-retrieval-config-bundle]")?.addEventListener("click", () => importRetrievalConfigBundle());
+  panel.querySelector("[data-clear-retrieval-config-bundle]")?.addEventListener("click", clearRetrievalConfigBundleDraft);
+  panel.querySelector("[data-download-retrieval-config-bundle-result]")?.addEventListener("click", downloadRetrievalConfigBundleResultCsv);
+  panel.querySelector("[data-retrieval-source-intake-input]")?.addEventListener("input", (event) => {
+    state.retrievalSourceIntakeInput = event.currentTarget.value;
+    state.retrievalSourceIntakeResult = null;
+  });
+  panel.querySelector("[data-retrieval-source-intake-sample-url]")?.addEventListener("change", (event) => {
+    state.retrievalSourceIntakeSampleUrl = Boolean(event.currentTarget.checked);
+    state.retrievalSourceIntakeResult = null;
+    renderAddItemModal();
+  });
+  panel.querySelector("[data-analyze-retrieval-source-intake]")?.addEventListener("click", analyzeRetrievalSourceIntake);
+  panel.querySelectorAll("[data-download-retrieval-source-intake]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalSourceIntakeReport(button.dataset.reportFormat));
+  });
+  panel.querySelector("[data-apply-retrieval-source-intake]")?.addEventListener("click", applyRetrievalSourceIntakeToFieldMapLab);
+  panel.querySelector("[data-apply-retrieval-source-intake-config]")?.addEventListener("click", applyRetrievalSourceIntakeToConfig);
+  panel.querySelector("[data-apply-retrieval-source-intake-queries]")?.addEventListener("click", applyRetrievalSourceIntakeQueriesToBatch);
+  panel.querySelector("[data-clear-retrieval-source-intake]")?.addEventListener("click", clearRetrievalSourceIntake);
+  panel.querySelector("[data-retrieval-field-map-lab-source]")?.addEventListener("change", (event) => {
+    state.retrievalFieldMapLabSource = event.currentTarget.value;
+    state.retrievalFieldMapLabResult = null;
+    renderAddItemModal();
+  });
+  panel.querySelector("[data-retrieval-field-map-lab-mode]")?.addEventListener("change", (event) => {
+    state.retrievalFieldMapLabMode = event.currentTarget.value;
+    state.retrievalFieldMapLabResult = null;
+    renderAddItemModal();
+  });
+  panel.querySelector("[data-retrieval-field-map-lab-ai]")?.addEventListener("change", (event) => {
+    state.retrievalFieldMapLabUseAi = Boolean(event.currentTarget.checked);
+    state.retrievalFieldMapLabResult = null;
+    renderAddItemModal();
+  });
+  panel.querySelector("[data-check-retrieval-model-status]")?.addEventListener("click", () => loadRetrievalModelStatus({ check: true }));
+  panel.querySelector("[data-retrieval-field-map-lab-input]")?.addEventListener("input", (event) => {
+    state.retrievalFieldMapLabInput = event.currentTarget.value;
+    state.retrievalFieldMapLabResult = null;
+  });
+  panel.querySelector("[data-retrieval-field-map-lab-config]")?.addEventListener("input", (event) => {
+    state.retrievalFieldMapLabConfig = event.currentTarget.value;
+    state.retrievalFieldMapLabResult = null;
+  });
+  panel.querySelector("[data-suggest-retrieval-field-map-lab]")?.addEventListener("click", () => suggestRetrievalFieldMapLab());
+  panel.querySelectorAll("[data-download-retrieval-field-map-report]").forEach((button) => {
+    button.addEventListener("click", () => downloadRetrievalFieldMapReport(button.dataset.reportFormat));
+  });
+  panel.querySelector("[data-apply-retrieval-field-map-lab]")?.addEventListener("click", applyRetrievalFieldMapLabDraft);
+  panel.querySelector("[data-clear-retrieval-field-map-lab]")?.addEventListener("click", clearRetrievalFieldMapLab);
+  panel.querySelectorAll("[data-retrieval-candidate-check]").forEach((input) => input.addEventListener("change", (event) => {
+    const key = event.currentTarget.dataset.retrievalCandidateCheck;
+    if (event.currentTarget.checked) state.retrievalSelectedKeys.add(key);
+    else state.retrievalSelectedKeys.delete(key);
+    renderAddItemModal();
+  }));
   panel.querySelectorAll("[data-import-select-item]").forEach((button) => button.addEventListener("click", () => {
     const item = state.items.find((value) => value.key === button.dataset.importSelectItem);
     if (item) {
@@ -424,6 +2669,232 @@ function renderAddItemModal() {
   }));
 }
 
+function renderRetrievalPage() {
+  const host = document.querySelector("[data-retrieval-page-panel]");
+  if (!host) return;
+  const editable = state.library?.editable !== false;
+  host.innerHTML = `
+    <div class="feature-panel-head retrieval-page-head">
+      <div>
+        <h2>多源检索</h2>
+        <p>${editable ? "先搜索、再勾选、最后导入。新数据源接入和批量验证放在下面高级区。" : "当前是只读源库，可以检索和看报告；导入条目请先创建本地副本。"}</p>
+      </div>
+    </div>
+    ${renderSimpleRetrievalMain()}
+    ${state.addItemMessage ? `<p class="import-message" data-import-message>${escapeHtml(state.addItemMessage)}</p>` : ""}
+    ${renderAddItemResults()}
+    <details class="retrieval-advanced">
+      <summary>
+        <span>高级：配置数据源 / 批量验证 / 汇报交接</span>
+        <em>先看源配置说明，再按 Local、HTTP、SQLite 或 Manifest 填对应配置。</em>
+      </summary>
+      <div class="retrieval-advanced-body">
+        ${renderRetrievalSourceConfigGuide()}
+        <details class="retrieval-advanced-section" open>
+          <summary>
+            <span>1. 配置新数据源</span>
+            <em>先用快速识别和字段映射辅助，再填写实际源配置。</em>
+          </summary>
+          <div class="retrieval-advanced-section-body">
+            ${renderRetrievalSourceIntake()}
+            ${renderRetrievalFieldMapLab()}
+            ${renderRetrievalLocalConfigWithPreview()}
+            ${renderRetrievalHttpJsonConfig()}
+            ${renderRetrievalSqliteConfig()}
+            ${renderRetrievalManifestConfig()}
+          </div>
+        </details>
+        <details class="retrieval-advanced-section">
+          <summary>
+            <span>2. 验证和交接</span>
+            <em>配置完成后跑 READY、Batch 和 ONB，确认源能稳定检索。</em>
+          </summary>
+          <div class="retrieval-advanced-section-body">
+            ${renderRetrievalReadiness()}
+            ${renderRetrievalOnboarding()}
+            ${renderRetrievalBatchPanel()}
+          </div>
+        </details>
+        <details class="retrieval-advanced-section">
+          <summary>
+            <span>3. 配置包和历史报告</span>
+            <em>用于导入队友配置、下载阶段报告、查看最近检索记录。</em>
+          </summary>
+          <div class="retrieval-advanced-section-body">
+            ${renderRetrievalConfigBundleImport()}
+            ${renderRetrievalSummary()}
+            ${renderRetrievalRuns()}
+          </div>
+        </details>
+      </div>
+    </details>
+  `;
+  bindRetrievalPageEvents(host);
+}
+
+function delegatedRetrievalSubmitEvent(event) {
+  const form = event.target;
+  return {
+    currentTarget: form,
+    target: form,
+    submitter: event.submitter,
+    preventDefault: () => event.preventDefault(),
+    stopPropagation: () => event.stopPropagation(),
+  };
+}
+
+function bindRetrievalPageEvents(host) {
+  if (host.dataset.retrievalEventsBound) return;
+  host.dataset.retrievalEventsBound = "1";
+  host.addEventListener("submit", (event) => {
+    if (!event.target.matches("form")) return;
+    const delegatedEvent = delegatedRetrievalSubmitEvent(event);
+    if (event.target.matches("[data-retrieval-search-form]")) submitRetrievalSearch(delegatedEvent);
+    else if (event.target.matches("[data-retrieval-local-paths-form]")) saveRetrievalLocalPaths(delegatedEvent);
+    else if (event.target.matches("[data-retrieval-http-json-form]")) saveRetrievalHttpJsonConfig(delegatedEvent);
+    else if (event.target.matches("[data-retrieval-sqlite-form]")) saveRetrievalSqliteConfig(delegatedEvent);
+    else if (event.target.matches("[data-retrieval-manifest-form]")) saveRetrievalManifestConfig(delegatedEvent);
+    else if (event.target.matches("[data-retrieval-batch-form]")) submitRetrievalBatch(delegatedEvent);
+  });
+  host.addEventListener("input", (event) => {
+    if (event.target.matches("[data-retrieval-query-input]")) {
+      const nextQuery = String(event.target.value || "").trim();
+      if (nextQuery !== state.retrievalQuery) {
+        state.retrievalQuery = nextQuery;
+        state.retrievalQueryPlan = null;
+        state.retrievalBatchQueries = "";
+        state.simplePlanBatchJobId = "";
+        state.simplePlanBatchLoadedJobId = "";
+      }
+    } else if (event.target.matches("[data-simple-batch-limit]")) {
+      state.retrievalSimpleBatchLimit = currentSimpleBatchLimitFromInput(event.target.value);
+    } else if (event.target.matches("[data-simple-source-limit]")) {
+      const source = String(event.target.dataset.simpleSourceLimit || "").trim().toLowerCase();
+      if (source) {
+        state.retrievalSimpleSourceLimits = {
+          ...(state.retrievalSimpleSourceLimits || {}),
+          [source]: currentSimpleBatchLimitFromInput(event.target.value),
+        };
+      }
+    } else if (event.target.matches("[data-retrieval-config-bundle-input]")) {
+      state.retrievalConfigBundleText = event.target.value;
+      state.retrievalConfigBundleResult = null;
+    } else if (event.target.matches("[data-retrieval-source-intake-input]")) {
+      state.retrievalSourceIntakeInput = event.target.value;
+      state.retrievalSourceIntakeResult = null;
+    } else if (event.target.matches("[data-retrieval-field-map-lab-input]")) {
+      state.retrievalFieldMapLabInput = event.target.value;
+      state.retrievalFieldMapLabResult = null;
+    } else if (event.target.matches("[data-retrieval-field-map-lab-config]")) {
+      state.retrievalFieldMapLabConfig = event.target.value;
+      state.retrievalFieldMapLabResult = null;
+    }
+  });
+  host.addEventListener("change", (event) => {
+    if (event.target.matches("[data-retrieval-query-plan-ai]")) {
+      state.retrievalQueryPlanUseAi = Boolean(event.target.checked);
+      state.retrievalQueryPlan = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-retrieval-source-intake-sample-url]")) {
+      state.retrievalSourceIntakeSampleUrl = Boolean(event.target.checked);
+      state.retrievalSourceIntakeResult = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-retrieval-field-map-lab-source]")) {
+      state.retrievalFieldMapLabSource = event.target.value;
+      state.retrievalFieldMapLabResult = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-retrieval-field-map-lab-mode]")) {
+      state.retrievalFieldMapLabMode = event.target.value;
+      state.retrievalFieldMapLabResult = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-retrieval-field-map-lab-ai]")) {
+      state.retrievalFieldMapLabUseAi = Boolean(event.target.checked);
+      state.retrievalFieldMapLabResult = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-retrieval-candidate-check]")) {
+      const key = event.target.dataset.retrievalCandidateCheck;
+      if (event.target.checked) state.retrievalSelectedKeys.add(key);
+      else state.retrievalSelectedKeys.delete(key);
+      renderRetrievalPage();
+    }
+  });
+  host.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || !host.contains(button)) return;
+    if (button.matches("[data-clear-retrieval-local-paths]")) clearRetrievalLocalPaths();
+    else if (button.matches("[data-suggest-retrieval-local-field-map]")) suggestRetrievalLocalFieldMap();
+    else if (button.matches("[data-refresh-retrieval-local-preview]")) loadRetrievalLocalPreview();
+    else if (button.matches("[data-retrieval-config-bundle-input]")) return;
+    else if (button.matches("[data-clear-retrieval-http-json]")) clearRetrievalHttpJsonConfig();
+    else if (button.matches("[data-suggest-retrieval-http-json-field-map]")) suggestRetrievalHttpJsonFieldMap();
+    else if (button.matches("[data-refresh-retrieval-http-json-preview]")) loadRetrievalHttpJsonPreview();
+    else if (button.matches("[data-clear-retrieval-sqlite]")) clearRetrievalSqliteConfig();
+    else if (button.matches("[data-suggest-retrieval-sqlite-field-map]")) suggestRetrievalSqliteFieldMap();
+    else if (button.matches("[data-refresh-retrieval-sqlite-preview]")) loadRetrievalSqlitePreview();
+    else if (button.matches("[data-clear-retrieval-manifest]")) clearRetrievalManifestConfig();
+    else if (button.matches("[data-suggest-retrieval-manifest-field-map]")) suggestRetrievalManifestFieldMap();
+    else if (button.matches("[data-refresh-retrieval-manifest-preview]")) loadRetrievalManifestPreview();
+    else if (button.matches("[data-simple-ai-query-plan]")) {
+      const queryInput = document.querySelector("[data-retrieval-query-input]");
+      state.retrievalQuery = String(queryInput?.value || state.retrievalQuery || "").trim();
+      state.retrievalQueryPlanUseAi = true;
+      draftRetrievalBatchQueries({ limit: 5 });
+    }
+    else if (button.matches("[data-simple-plan-batch]")) submitSimpleRetrievalPlanBatch();
+    else if (button.matches("[data-load-simple-batch-candidates]")) loadSimplePlanBatchCandidates(button.dataset.loadSimpleBatchCandidates);
+    else if (button.matches("[data-draft-retrieval-batch-queries]")) draftRetrievalBatchQueries();
+    else if (button.matches("[data-refresh-retrieval-batches]")) loadRetrievalBatchJobs();
+    else if (button.matches("[data-select-retrieval-candidates]")) setRetrievalCandidateSelection(button.dataset.selectRetrievalCandidates);
+    else if (button.matches("[data-import-retrieval-selected]")) submitRetrievalImport();
+    else if (button.matches("[data-refresh-retrieval-runs]")) loadRetrievalRuns();
+    else if (button.matches("[data-check-retrieval-sources]")) loadRetrievalSources({ check: true });
+    else if (button.matches("[data-setup-retrieval-rehearsal]")) setupRetrievalRehearsalKit();
+    else if (button.matches("[data-validate-retrieval-rehearsal]")) validateRetrievalRehearsalRun();
+    else if (button.matches("[data-check-retrieval-readiness]")) loadRetrievalReadiness();
+    else if (button.matches("[data-check-retrieval-onboarding]")) loadRetrievalOnboarding();
+    else if (button.matches("[data-download-retrieval-onboarding-package]")) downloadRetrievalOnboardingPackage();
+    else if (button.matches("[data-dry-run-retrieval-config-bundle]")) dryRunRetrievalConfigBundleImport();
+    else if (button.matches("[data-import-retrieval-config-bundle]")) importRetrievalConfigBundle();
+    else if (button.matches("[data-clear-retrieval-config-bundle]")) clearRetrievalConfigBundleDraft();
+    else if (button.matches("[data-download-retrieval-config-bundle-result]")) downloadRetrievalConfigBundleResultCsv();
+    else if (button.matches("[data-analyze-retrieval-source-intake]")) analyzeRetrievalSourceIntake();
+    else if (button.matches("[data-apply-retrieval-source-intake]")) applyRetrievalSourceIntakeToFieldMapLab();
+    else if (button.matches("[data-apply-retrieval-source-intake-config]")) applyRetrievalSourceIntakeToConfig();
+    else if (button.matches("[data-apply-retrieval-source-intake-queries]")) applyRetrievalSourceIntakeQueriesToBatch();
+    else if (button.matches("[data-clear-retrieval-source-intake]")) clearRetrievalSourceIntake();
+    else if (button.matches("[data-check-retrieval-model-status]")) loadRetrievalModelStatus({ check: true });
+    else if (button.matches("[data-suggest-retrieval-field-map-lab]")) suggestRetrievalFieldMapLab();
+    else if (button.matches("[data-apply-retrieval-field-map-lab]")) applyRetrievalFieldMapLabDraft();
+    else if (button.matches("[data-clear-retrieval-field-map-lab]")) clearRetrievalFieldMapLab();
+    else if (button.matches("[data-download-retrieval-configured-field-map]")) downloadRetrievalConfiguredFieldMapReport(button.dataset.downloadRetrievalConfiguredFieldMap, button.dataset.reportFormat);
+    else if (button.matches("[data-apply-retrieval-readiness-field-map]")) applyRetrievalReadinessFieldMapSuggestionToConfig(button.dataset.applyRetrievalReadinessFieldMap);
+    else if (button.matches("[data-apply-retrieval-http-json-template]")) applyRetrievalHttpJsonTemplate(button.dataset.applyRetrievalHttpJsonTemplate);
+    else if (button.matches("[data-apply-retrieval-sqlite-template]")) applyRetrievalSqliteTemplate(button.dataset.applyRetrievalSqliteTemplate);
+    else if (button.matches("[data-apply-retrieval-manifest-template]")) applyRetrievalManifestTemplate(button.dataset.applyRetrievalManifestTemplate);
+    else if (button.matches("[data-download-retrieval-query-plan]")) downloadRetrievalQueryPlanReport(button.dataset.reportFormat);
+    else if (button.matches("[data-pause-retrieval-batch]")) pauseRetrievalBatch(button.dataset.pauseRetrievalBatch);
+    else if (button.matches("[data-resume-retrieval-batch]")) resumeRetrievalBatch(button.dataset.resumeRetrievalBatch);
+    else if (button.matches("[data-cancel-retrieval-batch]")) cancelRetrievalBatch(button.dataset.cancelRetrievalBatch);
+    else if (button.matches("[data-retry-retrieval-batch]")) retryRetrievalBatchFailures(button.dataset.retryRetrievalBatch);
+    else if (button.matches("[data-download-retrieval-batch-report]")) downloadRetrievalBatchReport(button.dataset.downloadRetrievalBatchReport, button.dataset.reportFormat, button.dataset.reportScope);
+    else if (button.matches("[data-run-retrieval-remediation]")) runRetrievalBatchRemediation(button.dataset.runRetrievalRemediation);
+    else if (button.matches("[data-download-retrieval-report]")) downloadRetrievalReport(button.dataset.downloadRetrievalReport, button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-summary]")) downloadRetrievalSummaryReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-source-setup]")) downloadRetrievalSourceSetupReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-readiness]")) downloadRetrievalReadinessReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-tuning]")) downloadRetrievalTuningReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-onboarding]")) downloadRetrievalOnboardingReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-gate-artifact]")) downloadRetrievalGateArtifact(button.dataset.downloadRetrievalGateArtifact);
+    else if (button.matches("[data-download-retrieval-config-bundle]")) downloadRetrievalConfigBundle();
+    else if (button.matches("[data-download-retrieval-source-intake]")) downloadRetrievalSourceIntakeReport(button.dataset.reportFormat);
+    else if (button.matches("[data-download-retrieval-field-map-report]")) downloadRetrievalFieldMapReport(button.dataset.reportFormat);
+    else if (button.matches("[data-import-select-item]")) {
+      const item = state.items.find((value) => value.key === button.dataset.importSelectItem);
+      if (item) state.selectedItem = item;
+    }
+  });
+}
+
 function openAddItemModal() {
   if (!state.library?.editable) {
     window.alert("只读源库不能添加条目。请先创建本地副本。");
@@ -431,6 +2902,7 @@ function openAddItemModal() {
   }
   state.addItemMessage = "";
   state.addItemResults = [];
+  if (!["identifier", "text"].includes(state.addItemMode)) state.addItemMode = "identifier";
   document.querySelector("[data-add-item-modal]").hidden = false;
   renderAddItemModal();
 }
@@ -487,6 +2959,2172 @@ async function submitTextImport(event) {
     renderAddItemModal();
   } finally {
     state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function submitRetrievalSearch(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const query = String(formData.get("query") || "").trim();
+  const selectedSources = uniqueRetrievalSources(formData.getAll("sources").map((value) => String(value)));
+  const unavailableSources = unavailableRetrievalSources(selectedSources);
+  const focusedUnavailableSources = unavailableRetrievalSources([...state.retrievalSources]);
+  const sources = availableRetrievalSources(selectedSources);
+  state.retrievalQuery = query;
+  if (!query) {
+    state.addItemMessage = "检索词不能为空。";
+    renderAddItemModal();
+    return;
+  }
+  if (!selectedSources.length) {
+    state.addItemMessage = focusedUnavailableSources.length
+      ? unavailableRetrievalSourceMessage(focusedUnavailableSources)
+      : "请至少选择一个数据源。";
+    renderAddItemModal();
+    return;
+  }
+  state.retrievalSources = new Set(selectedSources);
+  if (unavailableSources.length) {
+    state.addItemMessage = unavailableRetrievalSourceMessage(unavailableSources);
+    renderAddItemModal();
+    return;
+  }
+  if (!sources.length) {
+    state.addItemMessage = "请至少选择一个可用数据源。";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.addItemBusy = true;
+    state.addItemMessage = "";
+    state.addItemResults = [];
+    renderAddItemModal();
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/search`, { query, sources, limit: 10, use_ai_evaluation: true });
+    state.retrievalCandidates = normalizeRetrievalCandidates(result.candidates || []);
+    state.retrievalSelectedKeys = new Set(
+      state.retrievalCandidates
+        .filter((candidate) => candidate.ai_evaluation?.auto_select === true)
+        .map((candidate) => candidate.client_key)
+        .filter(Boolean)
+    );
+    state.retrievalStats = result.source_stats || {};
+    state.retrievalAiEvaluationSummary = result.ai_evaluation_summary || null;
+    state.retrievalRunId = result.run_id || "";
+    const autoSelected = Number(state.retrievalAiEvaluationSummary?.auto_selected_count || state.retrievalSelectedKeys.size || 0);
+    const aiStatus = state.retrievalAiEvaluationSummary?.status
+      ? `AI 判断：${state.retrievalAiEvaluationSummary.status}${autoSelected ? `，默认勾选 ${autoSelected} 条` : ""}`
+      : "";
+    state.addItemMessage = `检索到 ${state.retrievalCandidates.length} 条候选。${aiStatus ? ` ${aiStatus}。` : ""}`;
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.retrievalCandidates = [];
+    state.retrievalSelectedKeys = new Set();
+    state.retrievalStats = null;
+    state.retrievalAiEvaluationSummary = null;
+    state.retrievalRunId = "";
+  } finally {
+    state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function submitRetrievalImport() {
+  const candidates = selectedRetrievalCandidates();
+  if (!candidates.length) {
+    state.addItemMessage = "请先勾选候选条目。";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.addItemBusy = true;
+    state.addItemMessage = "";
+    renderAddItemModal();
+    const candidateIds = candidates.map((candidate) => candidate.candidate_id).filter(Boolean);
+    const payload = {
+      collection_key: currentRealCollectionKey(),
+      run_id: state.retrievalRunId,
+      ...(candidateIds.length === candidates.length ? { candidate_ids: candidateIds } : { candidates }),
+    };
+    const summary = await postJSON(`/api/library/${state.libraryId}/retrieval/import`, payload);
+    state.retrievalSelectedKeys = new Set();
+    await finishImport(summary);
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.addItemResults = [];
+    renderAddItemModal();
+  } finally {
+    state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function uniqueRetrievalSources(sources) {
+  return [...new Set((sources || []).map((source) => String(source || "").trim()).filter(Boolean))];
+}
+
+function unavailableRetrievalSources(sources) {
+  return uniqueRetrievalSources(sources).filter((source) => state.retrievalSourceInfo[source]?.available === false);
+}
+
+function availableRetrievalSources(sources) {
+  return uniqueRetrievalSources(sources).filter((source) => !unavailableRetrievalSources([source]).length);
+}
+
+function retrievalSourceLabel(name) {
+  return state.retrievalSourceInfo[name]?.label || name;
+}
+
+function unavailableRetrievalSourceMessage(sources) {
+  const labels = unavailableRetrievalSources(sources).map(retrievalSourceLabel).join(", ");
+  return `所选数据源暂不可用：${labels}。请先保存配置或刷新数据源状态后再开始检索。`;
+}
+
+function currentRetrievalSourceSelection() {
+  const checked = [...document.querySelectorAll("[data-retrieval-search-form] input[name='sources']:checked")]
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+  return uniqueRetrievalSources(checked.length ? checked : [...state.retrievalSources]);
+}
+
+function currentRetrievalBatchQueriesText() {
+  const input = document.querySelector("[data-retrieval-batch-queries]");
+  const text = String(input?.value || state.retrievalBatchQueries || "").trim();
+  if (input) state.retrievalBatchQueries = String(input.value || "");
+  return text;
+}
+
+function applyRetrievalOnboardingQueryParams(params) {
+  const requiredQueries = currentRetrievalBatchQueriesText();
+  if (requiredQueries) params.set("required_queries", requiredQueries);
+  if (state.retrievalQueryPlanUseAi && state.retrievalModelStatus?.configured === true) params.set("use_ai", "1");
+}
+
+async function draftRetrievalBatchQueries(options = {}) {
+  if (!state.libraryId) return;
+  const seedQuery = String(document.querySelector("[data-retrieval-query-input]")?.value || state.retrievalQuery || "").trim();
+  state.retrievalQuery = seedQuery;
+  if (!seedQuery) {
+    state.retrievalBatchMessage = "请输入检索词后再生成计划。";
+    state.retrievalQueryPlan = null;
+    state.retrievalBatchQueries = "";
+    renderAddItemModal();
+    return;
+  }
+  const queryLimit = Math.max(1, Math.min(Number(options.limit || 5), 10));
+  const sampleSize = Math.max(1, Math.min(Number(options.sampleSize || 5), 5));
+  try {
+    state.retrievalQueryPlanBusy = true;
+    state.retrievalBatchMessage = "";
+    state.simplePlanBatchJobId = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ seed_query: seedQuery, sample_size: String(sampleSize), limit: String(queryLimit) });
+    currentRetrievalSourceSelection().forEach((source) => params.append("sources", source));
+    if (state.retrievalQueryPlanUseAi && state.retrievalModelStatus?.configured === true) params.set("use_ai", "1");
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/query-plan?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Failed to draft batch queries.");
+    const plan = data.plan || {};
+    state.retrievalQueryPlan = plan;
+    state.retrievalBatchQueries = String(plan.query_text || "").trim();
+    const queryCount = Number(plan.query_count || 0);
+    state.retrievalBatchMessage = `${plan.message || "Query plan drafted."} ${queryCount} queries ready to review.`;
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalQueryPlanBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function submitSimpleRetrievalPlanBatch() {
+  const queries = String(state.retrievalBatchQueries || state.retrievalQueryPlan?.query_text || "").trim();
+  const sourceSelection = simplePlanBatchSourceSelection();
+  const unavailableSources = sourceSelection.unavailable;
+  const sources = sourceSelection.available;
+  const sourceLimits = simplePlanBatchSourceLimits(sources);
+  if (!queries) {
+    state.retrievalBatchMessage = "请先生成检索计划。";
+    renderAddItemModal();
+    return;
+  }
+  if (unavailableSources.length) {
+    state.retrievalBatchMessage = unavailableRetrievalSourceMessage(unavailableSources);
+    renderAddItemModal();
+    return;
+  }
+  if (!sources.length) {
+    state.retrievalBatchMessage = "没有可用数据源，请先勾选或配置至少一个数据源。";
+    renderAddItemModal();
+    return;
+  }
+  const activeJob = currentSimplePlanBatchJob();
+  if (retrievalBatchIsActive(activeJob)) {
+    state.retrievalBatchMessage = `批量检索正在运行：${activeJob.completed_queries || 0}/${activeJob.total_queries || 0}`;
+    await loadRetrievalBatchJobs({ silent: true });
+    return;
+  }
+  try {
+    state.retrievalBatchBusy = true;
+    state.retrievalBatchMessage = "";
+    state.simplePlanBatchLoadedJobId = "";
+    state.retrievalCandidates = [];
+    state.retrievalSelectedKeys = new Set();
+    state.retrievalRunId = "";
+    renderAddItemModal();
+    const batchLimit = Math.max(currentSimpleBatchLimit(), ...Object.values(sourceLimits));
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/batches`, {
+      queries,
+      sources,
+      limit: batchLimit,
+      source_limits: sourceLimits,
+    });
+    state.simplePlanBatchJobId = data.job.job_id || "";
+    state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
+    const sourceNote = sourceSelection.recommended ? `使用计划推荐源：${sources.join(" / ")}` : `使用已勾选源：${sources.join(" / ")}`;
+    const limitNote = Object.entries(sourceLimits).map(([source, limit]) => `${retrievalSourceLabel(source)} ${limit}`).join(" / ");
+    state.retrievalBatchMessage = `已按计划创建批量检索：${data.job.completed_queries || 0}/${data.job.total_queries || 0}，${sourceNote}，每源数量：${limitNote || batchLimit}，完成后会显示到下方。`;
+    await loadRetrievalBatchJobs({ silent: true });
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalBatchBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadSimplePlanBatchCandidates(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.simplePlanBatchCandidatesBusy = true;
+    if (!silent) state.retrievalBatchMessage = "正在加载计划检索候选和 AI 推荐...";
+    renderAddItemModal();
+    const params = new URLSearchParams({ limit: "120", use_ai_evaluation: "1" });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/batches/${encodeURIComponent(cleanJobId)}/candidates?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载计划检索候选失败。");
+    state.retrievalCandidates = normalizeRetrievalCandidates(data.candidates || []);
+    state.retrievalSelectedKeys = new Set(
+      state.retrievalCandidates
+        .filter((candidate) => candidate.ai_evaluation?.auto_select === true)
+        .map((candidate) => candidate.client_key)
+        .filter(Boolean)
+    );
+    state.retrievalStats = data.source_stats || {};
+    state.retrievalAiEvaluationSummary = data.ai_evaluation_summary || null;
+    state.retrievalRunId = "";
+    state.simplePlanBatchLoadedJobId = cleanJobId;
+    const aiRecommended = state.retrievalCandidates.filter((candidate) => {
+      return String(candidate.ai_evaluation?.decision || "").toLowerCase() === "recommend";
+    }).length;
+    state.retrievalBatchMessage = `已显示计划检索结果：${state.retrievalCandidates.length} 条候选，AI 推荐 ${aiRecommended} 条，已自动勾选 ${state.retrievalSelectedKeys.size} 条。`;
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.simplePlanBatchCandidatesBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalQueryPlanReport(format = "markdown") {
+  const cleanFormat = String(format || "markdown").trim();
+  if (!state.libraryId) return;
+  const queryInput = document.querySelector("[data-retrieval-query-input]");
+  const seedQuery = String(queryInput?.value || state.retrievalQuery || "robot").trim() || "robot";
+  try {
+    const params = new URLSearchParams({
+      format: cleanFormat,
+      seed_query: seedQuery,
+      sample_size: "5",
+      limit: "5",
+    });
+    if (state.retrievalQueryPlanUseAi && state.retrievalModelStatus?.configured === true) params.set("use_ai", "1");
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/query-plan/report?${params.toString()}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Download query plan report failed.");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-query-plan.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function submitRetrievalBatch(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const queries = String(new FormData(form).get("queries") || "").trim();
+  const selectedSources = currentRetrievalSourceSelection();
+  const unavailableSources = unavailableRetrievalSources(selectedSources);
+  const sources = availableRetrievalSources(selectedSources);
+  state.retrievalBatchQueries = queries;
+  if (!queries) {
+    state.retrievalBatchMessage = "Add at least one query.";
+    renderAddItemModal();
+    return;
+  }
+  if (!selectedSources.length) {
+    state.retrievalBatchMessage = "Select at least one source.";
+    renderAddItemModal();
+    return;
+  }
+  if (unavailableSources.length) {
+    state.retrievalBatchMessage = unavailableRetrievalSourceMessage(unavailableSources);
+    renderAddItemModal();
+    return;
+  }
+  if (!sources.length) {
+    state.retrievalBatchMessage = "Select at least one available source.";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.retrievalBatchBusy = true;
+    state.retrievalBatchMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/batches`, { queries, sources, limit: 10 });
+    state.retrievalBatchQueries = "";
+    state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
+    state.retrievalBatchMessage = `Batch ${data.job.status || "queued"}: ${data.job.completed_queries || 0}/${data.job.total_queries || 0}`;
+    await loadRetrievalBatchJobs({ silent: true });
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalBatchBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalBatchJobs(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalBatchBusy = true;
+    if (!silent) state.retrievalBatchMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/batches`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Failed to load batch jobs");
+    state.retrievalBatchJobs = data.jobs || [];
+    scheduleRetrievalBatchRefresh();
+    const simpleJob = currentSimplePlanBatchJob();
+    if (
+      simpleJob &&
+      String(simpleJob.status || "") === "completed" &&
+      state.simplePlanBatchLoadedJobId !== String(simpleJob.job_id || "") &&
+      !state.simplePlanBatchCandidatesBusy
+    ) {
+      await loadSimplePlanBatchCandidates(simpleJob.job_id, { silent: true });
+    }
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalBatchBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function updateRetrievalBatchJob(jobId, action, message) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return;
+  try {
+    state.retrievalBatchBusy = true;
+    state.retrievalBatchMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/batches/${encodeURIComponent(cleanJobId)}/${action}`, {});
+    state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
+    state.retrievalBatchMessage = message;
+    await loadRetrievalBatchJobs({ silent: true });
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalBatchBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function cancelRetrievalBatch(jobId) {
+  await updateRetrievalBatchJob(jobId, "cancel", "Batch cancellation requested.");
+}
+
+async function pauseRetrievalBatch(jobId) {
+  await updateRetrievalBatchJob(jobId, "pause", "Batch paused.");
+}
+
+async function resumeRetrievalBatch(jobId) {
+  await updateRetrievalBatchJob(jobId, "resume", "Batch resumed.");
+}
+
+async function retryRetrievalBatchFailures(jobId) {
+  await updateRetrievalBatchJob(jobId, "retry-failed", "Retrying failed queries.");
+}
+
+function retrievalRemediationFromScope(scope) {
+  if (scope === "source-intake") {
+    return state.retrievalSourceIntakeResult?.validation_plan?.batch_validation?.remediation || {};
+  }
+  return state.retrievalOnboarding?.batch_validation?.remediation || {};
+}
+
+function retrievalRemediationPayload(remediation) {
+  const queries = (Array.isArray(remediation?.queries) ? remediation.queries : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const sources = (Array.isArray(remediation?.sources) ? remediation.sources : [])
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    queries: queries.join("\n"),
+    sources,
+    limit: 10,
+  };
+}
+
+function setRetrievalRemediationMessage(scope, message) {
+  if (scope === "source-intake") {
+    state.retrievalSourceIntakeMessage = message;
+  } else {
+    state.retrievalOnboardingMessage = message;
+  }
+  state.retrievalBatchMessage = message;
+}
+
+async function runRetrievalBatchRemediation(scope) {
+  const remediation = retrievalRemediationFromScope(scope);
+  const method = String(remediation?.method || "GET").trim().toUpperCase();
+  const endpoint = String(remediation?.endpoint || "").trim();
+  const label = String(remediation?.label || "Run validation batch").trim();
+  if (method !== "POST") {
+    if (endpoint) await downloadRetrievalGateArtifact(endpoint);
+    return;
+  }
+  if (!safeRetrievalEndpoint(endpoint)) {
+    setRetrievalRemediationMessage(scope, "Unsupported remediation endpoint.");
+    renderAddItemModal();
+    return;
+  }
+  const payload = endpoint === "/retrieval/batches" ? retrievalRemediationPayload(remediation) : {};
+  if (endpoint === "/retrieval/batches" && !payload.queries) {
+    setRetrievalRemediationMessage(scope, "No remediation queries available; use PLAN or Source intake queries first.");
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.retrievalBatchBusy = true;
+    setRetrievalRemediationMessage(scope, "");
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}${endpoint}`, payload);
+    if (data.job) {
+      state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
+      setRetrievalRemediationMessage(scope, `${label}: batch ${data.job.status || "queued"} ${data.job.completed_queries || 0}/${data.job.total_queries || 0}`);
+    } else {
+      setRetrievalRemediationMessage(scope, `${label}: requested.`);
+    }
+    await loadRetrievalBatchJobs({ silent: true });
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+    if (scope === "onboarding") await loadRetrievalOnboarding();
+  } catch (error) {
+    setRetrievalRemediationMessage(scope, error.message);
+  } finally {
+    state.retrievalBatchBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalBatchReport(jobId, format = "markdown", scope = "queries") {
+  const cleanJobId = String(jobId || "").trim();
+  const cleanFormat = String(format || "markdown").trim();
+  const cleanScope = String(scope || "queries").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  try {
+    const params = new URLSearchParams({ format: cleanFormat, scope: cleanScope });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/batches/${encodeURIComponent(cleanJobId)}/report?${params.toString()}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Failed to download batch report");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `${cleanJobId}-report.md`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalBatchMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalBatchRefresh() {
+  if (retrievalBatchRefreshTimer) window.clearTimeout(retrievalBatchRefreshTimer);
+  retrievalBatchRefreshTimer = null;
+  const hasActive = (state.retrievalBatchJobs || []).some((job) => retrievalBatchIsActive(job));
+  if (!hasActive) return;
+  retrievalBatchRefreshTimer = window.setTimeout(() => {
+    loadRetrievalBatchJobs({ silent: true });
+    loadRetrievalRuns({ silent: true });
+    loadRetrievalSummary({ silent: true });
+    loadRetrievalOnboarding({ silent: true });
+  }, 2000);
+}
+
+async function loadRetrievalRuns(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalRunsBusy = true;
+    if (!silent) state.retrievalRunsMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/runs`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载检索记录失败");
+    state.retrievalRuns = data.runs || [];
+    state.retrievalRunsMessage = "";
+  } catch (error) {
+    state.retrievalRunsMessage = error.message;
+  } finally {
+    state.retrievalRunsBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalSummary(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalSummaryBusy = true;
+    if (!silent) state.retrievalSummaryMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/summary`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载阶段统计失败");
+    state.retrievalSummary = data.summary || null;
+    state.retrievalSummaryMessage = "";
+  } catch (error) {
+    state.retrievalSummaryMessage = error.message;
+  } finally {
+    state.retrievalSummaryBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalSources(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  const check = Boolean(options.check);
+  try {
+    state.retrievalSourcesBusy = true;
+    state.retrievalSourcesChecking = check;
+    if (!silent) state.retrievalSourcesMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sources${check ? "?check=1" : ""}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载数据源状态失败");
+    const info = {};
+    (data.sources || []).forEach((source) => {
+      if (source.name) info[source.name] = source;
+    });
+    state.retrievalSourceInfo = info;
+    Object.entries(info).forEach(([name, source]) => {
+      if (source.available === false) state.retrievalSources.delete(name);
+    });
+    state.retrievalSourcesMessage = "";
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+  } finally {
+    state.retrievalSourcesBusy = false;
+    state.retrievalSourcesChecking = false;
+    renderAddItemModal();
+  }
+}
+
+async function setupRetrievalRehearsalKit() {
+  if (!state.libraryId) return;
+  const confirmed = window.confirm("Generate rehearsal CSV, SQLite and Object Manifest sources and replace current internal source configs?");
+  if (!confirmed) return;
+  try {
+    state.retrievalSourcesBusy = true;
+    state.retrievalSourcesMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/rehearsal/setup`, { replace_existing: true });
+    const query = data.kit?.queries?.[0] || "robot catalyst";
+    state.retrievalQuery = query;
+    ["localfile", "sqlite", "manifest"].forEach((source) => state.retrievalSources.add(source));
+    state.retrievalSourcesMessage = `${data.message || "Rehearsal kit configured."} Query: ${query}`;
+    await loadRetrievalLocalPaths({ silent: true });
+    await loadRetrievalSqliteConfig({ silent: true });
+    await loadRetrievalManifestConfig({ silent: true });
+    await loadRetrievalSources({ silent: true });
+    await loadRetrievalReadiness({ silent: true });
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+  } finally {
+    state.retrievalSourcesBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function validateRetrievalRehearsalRun() {
+  if (!state.libraryId) return;
+  const confirmed = window.confirm("Generate rehearsal sources, replace current internal source configs and start the 3-query PLAN validation batch?");
+  if (!confirmed) return;
+  try {
+    state.retrievalSourcesBusy = true;
+    state.retrievalBatchBusy = true;
+    state.retrievalReadinessBusy = true;
+    state.retrievalOnboardingBusy = true;
+    state.retrievalSourcesMessage = "";
+    state.retrievalBatchMessage = "";
+    state.retrievalReadinessMessage = "";
+    state.retrievalOnboardingMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/rehearsal/validate`, {
+      replace_existing: true,
+      sample_size: 2,
+      limit: 5,
+    });
+    const validationSummary = data.validation_summary || {};
+    const queries = Array.isArray(data.queries) ? data.queries : (data.kit?.queries || []);
+    const query = queries[0] || "robot catalyst";
+    const job = data.job || {};
+    state.retrievalQuery = query;
+    state.retrievalBatchQueries = queries.join("\n");
+    ["localfile", "sqlite", "manifest"].forEach((source) => state.retrievalSources.add(source));
+    if (data.readiness) {
+      state.retrievalReadiness = data.readiness;
+      state.retrievalReadinessMessage = data.readiness.message || "";
+      const info = {};
+      (data.readiness.sources || []).forEach((source) => {
+        if (source.name) info[source.name] = source;
+      });
+      if (Object.keys(info).length) state.retrievalSourceInfo = info;
+    }
+    if (data.onboarding) {
+      state.retrievalOnboarding = data.onboarding;
+      state.retrievalOnboardingMessage = data.onboarding.message || "";
+    }
+    if (job.job_id) {
+      state.retrievalBatchJobs = [job, ...state.retrievalBatchJobs.filter((item) => item.job_id !== job.job_id)];
+      state.retrievalBatchMessage = `Rehearsal batch ${job.status || "queued"}: ${job.completed_queries || 0}/${job.total_queries || 0}`;
+    }
+    state.retrievalSourcesMessage = validationSummary.status
+      ? `Rehearsal ${validationSummary.status}: ${validationSummary.completed_queries || 0}/${validationSummary.total_queries || 0} queries, ${validationSummary.total_candidates || 0} candidates, ${validationSummary.artifact_count || 0} artifacts.`
+      : (data.message || "Rehearsal validation started.");
+    await loadRetrievalLocalPaths({ silent: true });
+    await loadRetrievalSqliteConfig({ silent: true });
+    await loadRetrievalManifestConfig({ silent: true });
+    await loadRetrievalSources({ silent: true });
+    await loadRetrievalBatchJobs({ silent: true });
+    await loadRetrievalRuns({ silent: true });
+    await loadRetrievalSummary({ silent: true });
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+    state.retrievalBatchMessage = error.message;
+  } finally {
+    state.retrievalSourcesBusy = false;
+    state.retrievalBatchBusy = false;
+    state.retrievalReadinessBusy = false;
+    state.retrievalOnboardingBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalModelStatus(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  const check = Boolean(options.check);
+  try {
+    state.retrievalModelStatusBusy = true;
+    if (!silent) state.retrievalModelStatusMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/model-status${check ? "?check=1" : ""}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Failed to load model status.");
+    state.retrievalModelStatus = data.model || null;
+    state.retrievalModelStatusMessage = "";
+    if (state.retrievalModelStatus?.configured !== true) {
+      state.retrievalFieldMapLabUseAi = false;
+      state.retrievalQueryPlanUseAi = false;
+    }
+  } catch (error) {
+    state.retrievalModelStatus = null;
+    state.retrievalFieldMapLabUseAi = false;
+    state.retrievalQueryPlanUseAi = false;
+    state.retrievalModelStatusMessage = error.message;
+  } finally {
+    state.retrievalModelStatusBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalReadiness(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  const queryInput = document.querySelector("[data-retrieval-query-input]");
+  const query = String(queryInput?.value || state.retrievalQuery || "robot").trim() || "robot";
+  state.retrievalQuery = query;
+  try {
+    state.retrievalReadinessBusy = true;
+    if (!silent) state.retrievalReadinessMessage = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ query, sample_size: "2" });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/readiness?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    const readiness = data.readiness || null;
+    state.retrievalReadiness = readiness;
+    state.retrievalReadinessMessage = readiness?.message || "";
+    const info = {};
+    (readiness?.sources || []).forEach((source) => {
+      if (source.name) info[source.name] = source;
+    });
+    if (Object.keys(info).length) state.retrievalSourceInfo = info;
+  } catch (error) {
+    state.retrievalReadinessMessage = error.message;
+  } finally {
+    state.retrievalReadinessBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalOnboarding(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  const queryInput = document.querySelector("[data-retrieval-query-input]");
+  const query = String(queryInput?.value || state.retrievalQuery || "robot").trim() || "robot";
+  state.retrievalQuery = query;
+  try {
+    state.retrievalOnboardingBusy = true;
+    if (!silent) state.retrievalOnboardingMessage = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ query, sample_size: "2" });
+    applyRetrievalOnboardingQueryParams(params);
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/onboarding?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    const onboarding = data.onboarding || null;
+    state.retrievalOnboarding = onboarding;
+    state.retrievalOnboardingMessage = onboarding?.message || "";
+    if (onboarding?.readiness) {
+      state.retrievalReadiness = onboarding.readiness;
+      state.retrievalReadinessMessage = onboarding.readiness.message || state.retrievalReadinessMessage;
+    }
+    const info = {};
+    (onboarding?.readiness?.sources || []).forEach((source) => {
+      if (source.name) info[source.name] = source;
+    });
+    if (Object.keys(info).length) state.retrievalSourceInfo = info;
+  } catch (error) {
+    state.retrievalOnboardingMessage = error.message;
+  } finally {
+    state.retrievalOnboardingBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalLocalPaths(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalLocalPathsBusy = true;
+    if (!silent) state.retrievalLocalPathsMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/local-files`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载本地路径失败");
+    state.retrievalLocalPaths = (data.paths || []).join("\n");
+    state.retrievalLocalFieldMap = data.field_map && Object.keys(data.field_map).length
+      ? JSON.stringify(data.field_map, null, 2)
+      : "";
+    const status = data.status || {};
+    state.retrievalLocalPathsMessage = status.message || "";
+    if (status.available) await loadRetrievalLocalPreview({ silent: true });
+    else {
+      state.retrievalLocalPreview = null;
+      state.retrievalLocalPreviewMessage = "";
+    }
+  } catch (error) {
+    state.retrievalLocalPathsMessage = error.message;
+  } finally {
+    state.retrievalLocalPathsBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalLocalPreview(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalLocalPreviewBusy = true;
+    if (!silent) state.retrievalLocalPreviewMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/local-files/preview?sample_size=2`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Local preview failed");
+    state.retrievalLocalPreview = data.preview || null;
+    state.retrievalLocalPreviewMessage = "";
+  } catch (error) {
+    state.retrievalLocalPreview = null;
+    state.retrievalLocalPreviewMessage = silent ? "" : error.message;
+  } finally {
+    state.retrievalLocalPreviewBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function suggestedLocalFieldMapFromPreview(preview) {
+  const fieldMap = {};
+  (preview?.files || []).forEach((file) => {
+    const suggestion = file.field_map_suggestion || {};
+    Object.entries(suggestion.field_map || {}).forEach(([target, sourcePath]) => {
+      if (!fieldMap[target]) fieldMap[target] = sourcePath;
+    });
+  });
+  return fieldMap;
+}
+
+async function suggestRetrievalLocalFieldMap() {
+  if (!state.libraryId) return;
+  try {
+    state.retrievalLocalPreviewBusy = true;
+    state.retrievalLocalPathsMessage = "";
+    renderAddItemModal();
+    let fieldMap = {};
+    let apiError = null;
+    try {
+      const response = await fetch(`/api/library/${state.libraryId}/retrieval/local-files/field-map/suggest?sample_size=3`);
+      const data = await parseJSONResponse(response);
+      if (!data.ok) throw new Error(data.error || "Local field_map suggestion failed");
+      fieldMap = data.suggestion?.field_map || {};
+    } catch (error) {
+      apiError = error;
+    }
+    if (!Object.keys(fieldMap).length) {
+      if (!state.retrievalLocalPreview) {
+        await loadRetrievalLocalPreview({ silent: true });
+      }
+      fieldMap = suggestedLocalFieldMapFromPreview(state.retrievalLocalPreview);
+    }
+    const count = Object.keys(fieldMap).length;
+    if (!count) throw apiError || new Error("Local field_map suggestion is empty");
+    state.retrievalLocalFieldMap = JSON.stringify(fieldMap, null, 2);
+    state.retrievalLocalPathsMessage = `Suggested ${count} local field_map entries. Review and save.`;
+  } catch (error) {
+    state.retrievalLocalPathsMessage = error.message;
+  } finally {
+    state.retrievalLocalPreviewBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalHttpJsonConfig(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalHttpJsonBusy = true;
+    if (!silent) state.retrievalHttpJsonMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/http-json`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 HTTP JSON 配置失败");
+    state.retrievalHttpJsonConfig = data.config || "";
+    const summary = data.summary || {};
+    state.retrievalHttpJsonMessage = summary.configured
+      ? `${summary.label || "HTTP JSON"} configured via ${data.source || "preference"}.`
+      : "";
+  } catch (error) {
+    state.retrievalHttpJsonMessage = error.message;
+  } finally {
+    state.retrievalHttpJsonBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalHttpJsonTemplates(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    if (!silent) state.retrievalHttpJsonMessage = "";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/http-json/templates`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 HTTP JSON 模板失败");
+    state.retrievalHttpJsonTemplates = data.templates || [];
+  } catch (error) {
+    if (!silent) state.retrievalHttpJsonMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalHttpJsonTemplate(templateId) {
+  const template = (state.retrievalHttpJsonTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
+  if (!template) return;
+  state.retrievalHttpJsonConfig = JSON.stringify(template.config || {}, null, 2);
+  state.retrievalHttpJsonPreview = null;
+  state.retrievalHttpJsonPreviewMessage = "";
+  state.retrievalHttpJsonMessage = `${template.label || "Template"} template applied. Save to enable it.`;
+  renderAddItemModal();
+}
+
+async function loadRetrievalHttpJsonPreview(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalHttpJsonPreviewBusy = true;
+    if (!silent) state.retrievalHttpJsonPreviewMessage = "";
+    renderAddItemModal();
+    const query = String(state.retrievalQuery || "robot").trim() || "robot";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/http-json/preview?sample_size=2&query=${encodeURIComponent(query)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "HTTP JSON preview failed");
+    state.retrievalHttpJsonPreview = data.preview || null;
+    state.retrievalHttpJsonPreviewMessage = "";
+  } catch (error) {
+    state.retrievalHttpJsonPreview = null;
+    state.retrievalHttpJsonPreviewMessage = silent ? "" : error.message;
+  } finally {
+    state.retrievalHttpJsonPreviewBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalHttpJsonConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const config = String(new FormData(form).get("config") || "");
+  try {
+    state.retrievalHttpJsonBusy = true;
+    state.retrievalHttpJsonConfig = config;
+    state.retrievalHttpJsonMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/http-json`, { config });
+    state.retrievalHttpJsonConfig = data.config || "";
+    state.retrievalHttpJsonMessage = data.summary?.configured ? "HTTP JSON config saved." : "HTTP JSON config cleared.";
+    state.retrievalHttpJsonPreview = null;
+    state.retrievalHttpJsonPreviewMessage = "";
+    if (data.summary?.configured) state.retrievalSources.add("httpjson");
+    else state.retrievalSources.delete("httpjson");
+    if (data.summary?.configured) await loadRetrievalHttpJsonPreview({ silent: false });
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalHttpJsonMessage = error.message;
+  } finally {
+    state.retrievalHttpJsonBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function clearRetrievalHttpJsonConfig() {
+  try {
+    state.retrievalHttpJsonBusy = true;
+    state.retrievalHttpJsonMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/http-json`, { config: "" });
+    state.retrievalHttpJsonConfig = data.config || "";
+    state.retrievalHttpJsonMessage = "HTTP JSON config cleared.";
+    state.retrievalHttpJsonPreview = null;
+    state.retrievalHttpJsonPreviewMessage = "";
+    state.retrievalSources.delete("httpjson");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalHttpJsonMessage = error.message;
+  } finally {
+    state.retrievalHttpJsonBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalSqliteConfig(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalSqliteBusy = true;
+    if (!silent) state.retrievalSqliteMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sqlite`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 SQLite 配置失败");
+    state.retrievalSqliteConfig = data.config || "";
+    const summary = data.summary || {};
+    state.retrievalSqliteMessage = summary.configured
+      ? `${summary.label || "SQLite"} configured via ${data.source || "preference"}.`
+      : "";
+  } catch (error) {
+    state.retrievalSqliteMessage = error.message;
+  } finally {
+    state.retrievalSqliteBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalSqliteTemplates(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    if (!silent) state.retrievalSqliteMessage = "";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sqlite/templates`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 SQLite 模板失败");
+    state.retrievalSqliteTemplates = data.templates || [];
+  } catch (error) {
+    if (!silent) state.retrievalSqliteMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalSqliteTemplate(templateId) {
+  const template = (state.retrievalSqliteTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
+  if (!template) return;
+  state.retrievalSqliteConfig = JSON.stringify(template.config || {}, null, 2);
+  state.retrievalSqlitePreview = null;
+  state.retrievalSqlitePreviewMessage = "";
+  state.retrievalSqliteMessage = `${template.label || "Template"} template applied. Save to enable it.`;
+  renderAddItemModal();
+}
+
+async function loadRetrievalSqlitePreview(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalSqlitePreviewBusy = true;
+    if (!silent) state.retrievalSqlitePreviewMessage = "";
+    renderAddItemModal();
+    const query = String(state.retrievalQuery || "robot").trim() || "robot";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sqlite/preview?sample_size=2&query=${encodeURIComponent(query)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "SQLite preview failed");
+    state.retrievalSqlitePreview = data.preview || null;
+    state.retrievalSqlitePreviewMessage = "";
+  } catch (error) {
+    state.retrievalSqlitePreview = null;
+    state.retrievalSqlitePreviewMessage = silent ? "" : error.message;
+  } finally {
+    state.retrievalSqlitePreviewBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalSqliteConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const config = String(new FormData(form).get("config") || "");
+  try {
+    state.retrievalSqliteBusy = true;
+    state.retrievalSqliteConfig = config;
+    state.retrievalSqliteMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/sqlite`, { config });
+    state.retrievalSqliteConfig = data.config || "";
+    state.retrievalSqliteMessage = data.summary?.configured ? "SQLite config saved." : "SQLite config cleared.";
+    state.retrievalSqlitePreview = null;
+    state.retrievalSqlitePreviewMessage = "";
+    if (data.summary?.configured) state.retrievalSources.add("sqlite");
+    else state.retrievalSources.delete("sqlite");
+    if (data.summary?.configured) await loadRetrievalSqlitePreview({ silent: false });
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalSqliteMessage = error.message;
+  } finally {
+    state.retrievalSqliteBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function clearRetrievalSqliteConfig() {
+  try {
+    state.retrievalSqliteBusy = true;
+    state.retrievalSqliteMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/sqlite`, { config: "" });
+    state.retrievalSqliteConfig = data.config || "";
+    state.retrievalSqliteMessage = "SQLite config cleared.";
+    state.retrievalSqlitePreview = null;
+    state.retrievalSqlitePreviewMessage = "";
+    state.retrievalSources.delete("sqlite");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalSqliteMessage = error.message;
+  } finally {
+    state.retrievalSqliteBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalManifestConfig(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalManifestBusy = true;
+    if (!silent) state.retrievalManifestMessage = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/manifest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 Object Manifest 配置失败");
+    state.retrievalManifestConfig = data.config || "";
+    const summary = data.summary || {};
+    state.retrievalManifestMessage = summary.configured
+      ? `${summary.label || "Object Manifest"} configured via ${data.source || "preference"}.`
+      : "";
+  } catch (error) {
+    state.retrievalManifestMessage = error.message;
+  } finally {
+    state.retrievalManifestBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalManifestTemplates(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    if (!silent) state.retrievalManifestMessage = "";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/manifest/templates`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 Object Manifest 模板失败");
+    state.retrievalManifestTemplates = data.templates || [];
+  } catch (error) {
+    if (!silent) state.retrievalManifestMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalManifestTemplate(templateId) {
+  const template = (state.retrievalManifestTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
+  if (!template) return;
+  state.retrievalManifestConfig = JSON.stringify(template.config || {}, null, 2);
+  state.retrievalManifestPreview = null;
+  state.retrievalManifestPreviewMessage = "";
+  state.retrievalManifestMessage = `${template.label || "Template"} template applied. Save to enable it.`;
+  renderAddItemModal();
+}
+
+function retrievalFieldMapSuggestionMessage(suggestion, draftApplied) {
+  const fieldMap = suggestion?.field_map || {};
+  const count = Object.keys(fieldMap).length;
+  const sampleCount = Number(suggestion?.sample_count || 0);
+  if (draftApplied) {
+    return `Suggested ${count} field_map entries from ${sampleCount} samples. Review and save.`;
+  }
+  const inlineMap = count ? ` field_map: ${JSON.stringify(fieldMap)}` : "";
+  return `${suggestion?.message || "Suggestion generated, but no editable config draft was returned."}${inlineMap}`;
+}
+
+function applyRetrievalFieldMapSuggestionToConfig(sourceKey, suggestion) {
+  const draft = suggestion?.config_draft || {};
+  const draftApplied = suggestion?.draft_available !== false && Object.keys(draft).length > 0;
+  const message = retrievalFieldMapSuggestionMessage(suggestion, draftApplied);
+  const configText = draftApplied ? JSON.stringify(draft, null, 2) : "";
+  if (sourceKey === "localfile") {
+    if (draftApplied && Array.isArray(draft.paths)) state.retrievalLocalPaths = draft.paths.join("\n");
+    if (draftApplied) state.retrievalLocalFieldMap = JSON.stringify(draft.field_map || {}, null, 2);
+    state.retrievalLocalPreview = null;
+    state.retrievalLocalPreviewMessage = "";
+    state.retrievalLocalPathsMessage = message;
+  } else if (sourceKey === "httpjson") {
+    if (draftApplied) state.retrievalHttpJsonConfig = configText;
+    state.retrievalHttpJsonPreview = null;
+    state.retrievalHttpJsonPreviewMessage = "";
+    state.retrievalHttpJsonMessage = message;
+  } else if (sourceKey === "sqlite") {
+    if (draftApplied) state.retrievalSqliteConfig = configText;
+    state.retrievalSqlitePreview = null;
+    state.retrievalSqlitePreviewMessage = "";
+    state.retrievalSqliteMessage = message;
+  } else if (sourceKey === "manifest") {
+    if (draftApplied) state.retrievalManifestConfig = configText;
+    state.retrievalManifestPreview = null;
+    state.retrievalManifestPreviewMessage = "";
+    state.retrievalManifestMessage = message;
+  }
+}
+
+async function analyzeRetrievalSourceIntake() {
+  if (!state.libraryId) return;
+  const input = String(state.retrievalSourceIntakeInput || "").trim();
+  if (!input) {
+    state.retrievalSourceIntakeMessage = "Paste a path, URL, SQL query, columns or JSON sample.";
+    renderAddItemModal();
+    return;
+  }
+  state.retrievalSourceIntakeInput = input;
+  try {
+    state.retrievalSourceIntakeBusy = true;
+    state.retrievalSourceIntakeMessage = "";
+    state.retrievalSourceIntakeResult = null;
+    renderAddItemModal();
+    const data = await postJSON(
+      `/api/library/${state.libraryId}/retrieval/source-intake`,
+      { input, sample_url: state.retrievalSourceIntakeSampleUrl },
+    );
+    state.retrievalSourceIntakeResult = data.intake || null;
+    const result = state.retrievalSourceIntakeResult || {};
+    state.retrievalSourceIntakeMessage = result.message || "Source intake analyzed.";
+  } catch (error) {
+    state.retrievalSourceIntakeResult = null;
+    state.retrievalSourceIntakeMessage = error.message;
+  } finally {
+    state.retrievalSourceIntakeBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalSourceIntakeReport(format = "markdown") {
+  if (!state.libraryId) return;
+  const cleanFormat = String(format || "markdown").trim();
+  const input = String(document.querySelector("[data-retrieval-source-intake-input]")?.value || state.retrievalSourceIntakeInput || "").trim();
+  if (!input) {
+    state.retrievalSourceIntakeMessage = "Paste a path, URL, SQL query, columns or JSON sample.";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.retrievalSourceIntakeBusy = true;
+    state.retrievalSourceIntakeMessage = "";
+    renderAddItemModal();
+    const response = await fetch(
+      `/api/library/${state.libraryId}/retrieval/source-intake/report?format=${encodeURIComponent(cleanFormat)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input, sample_url: state.retrievalSourceIntakeSampleUrl }),
+      },
+    );
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Download source intake report failed.");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-source-intake-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    state.retrievalSourceIntakeMessage = "Source intake report downloaded.";
+  } catch (error) {
+    state.retrievalSourceIntakeMessage = error.message;
+  } finally {
+    state.retrievalSourceIntakeBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalSourceIntakeToFieldMapLab() {
+  const lab = state.retrievalSourceIntakeResult?.field_map_lab || {};
+  if (!lab.source_type) return;
+  state.retrievalFieldMapLabSource = lab.source_type;
+  state.retrievalFieldMapLabMode = lab.input_mode || "columns";
+  state.retrievalFieldMapLabInput = lab.input || state.retrievalSourceIntakeInput || "";
+  state.retrievalFieldMapLabConfig = lab.config || "";
+  state.retrievalFieldMapLabResult = state.retrievalSourceIntakeResult?.field_map_suggestion || null;
+  state.retrievalFieldMapLabMessage = "Intake draft loaded. Review and apply or save the target source config.";
+  renderAddItemModal();
+}
+
+function applyRetrievalSourceIntakeToConfig() {
+  const result = state.retrievalSourceIntakeResult || {};
+  const sourceType = result.source_type || result.field_map_lab?.source_type;
+  const suggestion = result.field_map_suggestion || {};
+  if (!sourceType || !Object.keys(suggestion.config_draft || {}).length) {
+    state.retrievalSourceIntakeMessage = "No config draft available from intake yet.";
+    renderAddItemModal();
+    return;
+  }
+  applyRetrievalFieldMapSuggestionToConfig(sourceType, suggestion);
+  state.retrievalSourceIntakeMessage = "Intake config draft applied. Review and save the target source config.";
+  renderAddItemModal();
+}
+
+function retrievalSourceNameFromIntake(sourceType) {
+  return {
+    local: "localfile",
+    local_file: "localfile",
+    localfile: "localfile",
+    http: "httpjson",
+    http_json: "httpjson",
+    httpjson: "httpjson",
+    rest: "httpjson",
+    sqlite: "sqlite",
+    sqlite3: "sqlite",
+    manifest: "manifest",
+    object_manifest: "manifest",
+    objectmanifest: "manifest",
+  }[String(sourceType || "").trim().toLowerCase()] || "";
+}
+
+function retrievalTargetSourceNameFromIntake(result) {
+  const targetName = String(result?.target_source?.name || "").trim();
+  return targetName || retrievalSourceNameFromIntake(result?.source_type || result?.field_map_lab?.source_type);
+}
+
+function applyRetrievalSourceIntakeQueriesToBatch() {
+  const result = state.retrievalSourceIntakeResult || {};
+  const validation = state.retrievalSourceIntakeResult?.validation_queries || {};
+  const queryText = String(validation.query_text || "").trim();
+  if (!queryText) {
+    state.retrievalSourceIntakeMessage = "No intake validation query draft available yet.";
+    renderAddItemModal();
+    return;
+  }
+  state.retrievalBatchQueries = queryText;
+  const sourceName = retrievalTargetSourceNameFromIntake(result);
+  if (sourceName) state.retrievalSources = new Set([sourceName]);
+  const queryCount = Number(validation.query_count || queryText.split(/\n+/).filter(Boolean).length);
+  const sourceNote = sourceName ? ` Target source ${sourceName} is focused by default.` : "";
+  state.retrievalSourceIntakeMessage = `Loaded ${queryCount} intake validation queries into the batch form.${sourceNote} Save the source config before starting the batch.`;
+  state.retrievalBatchMessage = sourceName
+    ? `Review intake validation queries for ${sourceName}; only this target source is selected by default.`
+    : "Review intake validation queries, select sources, then start batch retrieval.";
+  renderAddItemModal();
+}
+
+function clearRetrievalSourceIntake() {
+  state.retrievalSourceIntakeInput = "";
+  state.retrievalSourceIntakeSampleUrl = false;
+  state.retrievalSourceIntakeResult = null;
+  state.retrievalSourceIntakeMessage = "";
+  renderAddItemModal();
+}
+
+function syncRetrievalFieldMapLabFormState() {
+  const source = document.querySelector("[data-retrieval-field-map-lab-source]");
+  const mode = document.querySelector("[data-retrieval-field-map-lab-mode]");
+  const useAi = document.querySelector("[data-retrieval-field-map-lab-ai]");
+  const input = document.querySelector("[data-retrieval-field-map-lab-input]");
+  const config = document.querySelector("[data-retrieval-field-map-lab-config]");
+  if (source) state.retrievalFieldMapLabSource = source.value;
+  if (mode) state.retrievalFieldMapLabMode = mode.value;
+  if (useAi) state.retrievalFieldMapLabUseAi = Boolean(useAi.checked);
+  if (input) state.retrievalFieldMapLabInput = input.value;
+  if (config) state.retrievalFieldMapLabConfig = config.value;
+}
+
+function retrievalFieldMapLabConfigObject() {
+  const text = String(state.retrievalFieldMapLabConfig || "").trim();
+  if (!text) return {};
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Optional config JSON must be an object.");
+  return parsed;
+}
+
+function retrievalFieldMapLabColumns(text) {
+  return String(text || "")
+    .split(/[\n,\t;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function valueAtDotPath(value, path) {
+  if (!path) return undefined;
+  return String(path).split(".").filter(Boolean).reduce((current, key) => {
+    if (current && typeof current === "object") return current[key];
+    return undefined;
+  }, value);
+}
+
+function retrievalFieldMapLabSamples(text, config) {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) throw new Error("Paste JSON samples first.");
+  const parsed = JSON.parse(cleanText);
+  const configuredItems = valueAtDotPath(parsed, config?.items_path || "");
+  if (Array.isArray(configuredItems)) return configuredItems;
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.samples)) return parsed.samples;
+  if (Array.isArray(parsed?.items)) return parsed.items;
+  if (Array.isArray(parsed?.results)) return parsed.results;
+  if (Array.isArray(parsed?.records)) return parsed.records;
+  if (Array.isArray(parsed?.data?.records)) return parsed.data.records;
+  if (Array.isArray(parsed?.data?.items)) return parsed.data.items;
+  return [parsed];
+}
+
+function retrievalFieldMapLabPayload() {
+  syncRetrievalFieldMapLabFormState();
+  const config = retrievalFieldMapLabConfigObject();
+  const payload = {
+    source_type: state.retrievalFieldMapLabSource,
+  };
+  if (state.retrievalFieldMapLabUseAi && state.retrievalModelStatus?.configured === true) payload.use_ai = true;
+  if (Object.keys(config).length) payload.config = config;
+  if (state.retrievalFieldMapLabMode === "samples") {
+    payload.samples = retrievalFieldMapLabSamples(state.retrievalFieldMapLabInput, config);
+  } else {
+    const columns = retrievalFieldMapLabColumns(state.retrievalFieldMapLabInput);
+    if (!columns.length) throw new Error("Enter at least one source column.");
+    payload.columns = columns;
+  }
+  return payload;
+}
+
+async function suggestRetrievalFieldMapLab() {
+  if (!state.libraryId) return;
+  try {
+    state.retrievalFieldMapLabBusy = true;
+    state.retrievalFieldMapLabResult = null;
+    state.retrievalFieldMapLabMessage = "";
+    renderAddItemModal();
+    const payload = retrievalFieldMapLabPayload();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/field-map/suggest`, payload);
+    if (state.retrievalFieldMapLabSource === "localfile" && Object.keys(data.field_map || {}).length && !Object.keys(data.config_draft || {}).length) {
+      data.config_draft = { field_map: data.field_map };
+    }
+    if (Object.keys(data.config_draft || {}).length) data.draft_available = true;
+    state.retrievalFieldMapLabResult = data;
+    const ai = data.ai_enhancement || {};
+    const aiMessage = ai.requested ? ` AI: ${ai.status || "requested"}.` : "";
+    state.retrievalFieldMapLabMessage = `Suggested ${Object.keys(data.field_map || {}).length} field_map entries.${aiMessage}`;
+  } catch (error) {
+    state.retrievalFieldMapLabResult = null;
+    state.retrievalFieldMapLabMessage = error.message;
+  } finally {
+    state.retrievalFieldMapLabBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalFieldMapReport(format = "markdown") {
+  if (!state.libraryId) return;
+  const cleanFormat = String(format || "markdown").trim();
+  let payload = {};
+  try {
+    payload = retrievalFieldMapLabPayload();
+  } catch (error) {
+    state.retrievalFieldMapLabMessage = error.message;
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.retrievalFieldMapLabBusy = true;
+    state.retrievalFieldMapLabMessage = "";
+    renderAddItemModal();
+    const response = await fetch(
+      `/api/library/${state.libraryId}/retrieval/field-map/report?format=${encodeURIComponent(cleanFormat)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Download field map report failed.");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-field-map-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    state.retrievalFieldMapLabMessage = "Field map report downloaded.";
+  } catch (error) {
+    state.retrievalFieldMapLabMessage = error.message;
+  } finally {
+    state.retrievalFieldMapLabBusy = false;
+    renderAddItemModal();
+  }
+}
+
+const configuredFieldMapReportSources = {
+  localfile: {
+    endpoint: "local-files",
+    busyKey: "retrievalLocalPreviewBusy",
+    messageKey: "retrievalLocalPathsMessage",
+    label: "Local field_map",
+    includeQuery: false,
+  },
+  httpjson: {
+    endpoint: "http-json",
+    busyKey: "retrievalHttpJsonBusy",
+    messageKey: "retrievalHttpJsonMessage",
+    label: "HTTP JSON field_map",
+    includeQuery: true,
+  },
+  sqlite: {
+    endpoint: "sqlite",
+    busyKey: "retrievalSqliteBusy",
+    messageKey: "retrievalSqliteMessage",
+    label: "SQLite field_map",
+    includeQuery: true,
+  },
+  manifest: {
+    endpoint: "manifest",
+    busyKey: "retrievalManifestBusy",
+    messageKey: "retrievalManifestMessage",
+    label: "Object Manifest field_map",
+    includeQuery: false,
+  },
+};
+
+async function downloadRetrievalConfiguredFieldMapReport(sourceKey, format = "markdown") {
+  if (!state.libraryId) return;
+  const source = configuredFieldMapReportSources[String(sourceKey || "")];
+  if (!source) return;
+  const cleanFormat = String(format || "markdown").trim();
+  const params = new URLSearchParams({ sample_size: "3", format: cleanFormat });
+  if (source.includeQuery) params.set("query", String(state.retrievalQuery || "robot").trim() || "robot");
+  try {
+    state[source.busyKey] = true;
+    state[source.messageKey] = "";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/${source.endpoint}/field-map/report?${params.toString()}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || `Download ${source.label} report failed.`);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-${source.endpoint}-field-map-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    state[source.messageKey] = `${source.label} report downloaded.`;
+  } catch (error) {
+    state[source.messageKey] = error.message;
+  } finally {
+    state[source.busyKey] = false;
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalFieldMapLabDraft() {
+  if (!state.retrievalFieldMapLabResult) return;
+  applyRetrievalFieldMapSuggestionToConfig(state.retrievalFieldMapLabSource, state.retrievalFieldMapLabResult);
+  state.retrievalFieldMapLabMessage = "Draft applied. Review and save the target source config.";
+  renderAddItemModal();
+}
+
+function clearRetrievalFieldMapLab() {
+  state.retrievalFieldMapLabInput = "";
+  state.retrievalFieldMapLabConfig = "";
+  state.retrievalFieldMapLabResult = null;
+  state.retrievalFieldMapLabMessage = "";
+  renderAddItemModal();
+}
+
+function applyRetrievalReadinessFieldMapSuggestionToConfig(sourceKey) {
+  const normalizedSource = String(sourceKey || "").trim();
+  const entry = (state.retrievalReadiness?.previews || []).find((item) => item?.name === normalizedSource);
+  if (!entry?.field_map_suggestion) return;
+  applyRetrievalFieldMapSuggestionToConfig(normalizedSource, entry.field_map_suggestion);
+  renderAddItemModal();
+}
+
+async function suggestRetrievalHttpJsonFieldMap() {
+  if (!state.libraryId) return;
+  const query = String(state.retrievalQuery || "robot").trim() || "robot";
+  try {
+    state.retrievalHttpJsonBusy = true;
+    state.retrievalHttpJsonMessage = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ sample_size: "3", query });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/http-json/field-map/suggest?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "HTTP JSON field_map suggestion failed");
+    applyRetrievalFieldMapSuggestionToConfig("httpjson", data.suggestion || {});
+  } catch (error) {
+    state.retrievalHttpJsonMessage = error.message;
+  } finally {
+    state.retrievalHttpJsonBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function suggestRetrievalSqliteFieldMap() {
+  if (!state.libraryId) return;
+  const query = String(state.retrievalQuery || "robot").trim() || "robot";
+  try {
+    state.retrievalSqliteBusy = true;
+    state.retrievalSqliteMessage = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ sample_size: "3", query });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sqlite/field-map/suggest?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "SQLite field_map suggestion failed");
+    applyRetrievalFieldMapSuggestionToConfig("sqlite", data.suggestion || {});
+  } catch (error) {
+    state.retrievalSqliteMessage = error.message;
+  } finally {
+    state.retrievalSqliteBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function suggestRetrievalManifestFieldMap() {
+  if (!state.libraryId) return;
+  try {
+    state.retrievalManifestBusy = true;
+    state.retrievalManifestMessage = "";
+    renderAddItemModal();
+    const params = new URLSearchParams({ sample_size: "3" });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/manifest/field-map/suggest?${params.toString()}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Object Manifest field_map suggestion failed");
+    applyRetrievalFieldMapSuggestionToConfig("manifest", data.suggestion || {});
+  } catch (error) {
+    state.retrievalManifestMessage = error.message;
+  } finally {
+    state.retrievalManifestBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalManifestPreview(options = {}) {
+  if (!state.libraryId) return;
+  const silent = Boolean(options.silent);
+  try {
+    state.retrievalManifestPreviewBusy = true;
+    if (!silent) state.retrievalManifestPreviewMessage = "";
+    renderAddItemModal();
+    const query = String(state.retrievalQuery || "robot").trim() || "robot";
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/manifest/preview?sample_size=2&query=${encodeURIComponent(query)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "Object Manifest preview failed");
+    state.retrievalManifestPreview = data.preview || null;
+    state.retrievalManifestPreviewMessage = "";
+  } catch (error) {
+    state.retrievalManifestPreview = null;
+    state.retrievalManifestPreviewMessage = silent ? "" : error.message;
+  } finally {
+    state.retrievalManifestPreviewBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalManifestConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const config = String(new FormData(form).get("config") || "");
+  try {
+    state.retrievalManifestBusy = true;
+    state.retrievalManifestConfig = config;
+    state.retrievalManifestMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/manifest`, { config });
+    state.retrievalManifestConfig = data.config || "";
+    state.retrievalManifestMessage = data.summary?.configured ? "Object Manifest config saved." : "Object Manifest config cleared.";
+    state.retrievalManifestPreview = null;
+    state.retrievalManifestPreviewMessage = "";
+    if (data.summary?.configured) state.retrievalSources.add("manifest");
+    else state.retrievalSources.delete("manifest");
+    if (data.summary?.configured) await loadRetrievalManifestPreview({ silent: false });
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalManifestMessage = error.message;
+  } finally {
+    state.retrievalManifestBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function clearRetrievalManifestConfig() {
+  try {
+    state.retrievalManifestBusy = true;
+    state.retrievalManifestMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/manifest`, { config: "" });
+    state.retrievalManifestConfig = data.config || "";
+    state.retrievalManifestMessage = "Object Manifest config cleared.";
+    state.retrievalManifestPreview = null;
+    state.retrievalManifestPreviewMessage = "";
+    state.retrievalSources.delete("manifest");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalManifestMessage = error.message;
+  } finally {
+    state.retrievalManifestBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalLocalPaths(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const paths = String(new FormData(form).get("paths") || "");
+  const fieldMap = String(new FormData(form).get("field_map") || "");
+  try {
+    state.retrievalLocalPathsBusy = true;
+    state.retrievalLocalPaths = paths;
+    state.retrievalLocalFieldMap = fieldMap;
+    state.retrievalLocalPathsMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/local-files`, { paths, field_map_text: fieldMap });
+    state.retrievalLocalPaths = (data.paths || []).join("\n");
+    state.retrievalLocalFieldMap = data.field_map && Object.keys(data.field_map).length
+      ? JSON.stringify(data.field_map, null, 2)
+      : "";
+    state.retrievalLocalPathsMessage = data.status?.message || "已保存本地路径。";
+    if (data.status?.available) state.retrievalSources.add("localfile");
+    if (data.status?.available) await loadRetrievalLocalPreview({ silent: true });
+    else {
+      state.retrievalLocalPreview = null;
+      state.retrievalLocalPreviewMessage = "";
+    }
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalLocalPathsMessage = error.message;
+  } finally {
+    state.retrievalLocalPathsBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function clearRetrievalLocalPaths() {
+  try {
+    state.retrievalLocalPathsBusy = true;
+    state.retrievalLocalPathsMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/local-files`, { paths: [] });
+    state.retrievalLocalPaths = "";
+    state.retrievalLocalFieldMap = "";
+    state.retrievalLocalPathsMessage = data.status?.message || "已清空本地路径。";
+    state.retrievalLocalPreview = null;
+    state.retrievalLocalPreviewMessage = "";
+    state.retrievalSources.delete("localfile");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalLocalPathsMessage = error.message;
+  } finally {
+    state.retrievalLocalPathsBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalReport(runId, format = "markdown") {
+  const cleanRunId = String(runId || "").trim();
+  const cleanFormat = String(format || "markdown").trim();
+  if (!cleanRunId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/runs/${encodeURIComponent(cleanRunId)}/report?format=${encodeURIComponent(cleanFormat)}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载检索报告失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `${cleanRunId}-report.md`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalRunsMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalSummaryReport(format = "markdown") {
+  const cleanFormat = String(format || "markdown").trim();
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/summary/report?format=${encodeURIComponent(cleanFormat)}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载阶段统计报告失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-summary-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalSummaryMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalSourceSetupReport(format = "markdown") {
+  const cleanFormat = String(format || "markdown").trim();
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/sources/report?format=${encodeURIComponent(cleanFormat)}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载源配置报告失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-source-setup-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalReadinessReport(format = "markdown") {
+  const cleanFormat = String(format || "markdown").trim();
+  if (!state.libraryId) return;
+  const queryInput = document.querySelector("[data-retrieval-query-input]");
+  const query = String(queryInput?.value || state.retrievalQuery || "robot").trim() || "robot";
+  try {
+    const params = new URLSearchParams({ format: cleanFormat, query, sample_size: "2" });
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/readiness/report?${params.toString()}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Download readiness report failed.");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-readiness-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalReadinessMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalTuningReport(format = "markdown") {
+  const cleanFormat = String(format || "markdown").trim();
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/tuning/report?format=${encodeURIComponent(cleanFormat)}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载限流调优报告失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `retrieval-tuning-report.${cleanFormat === "csv" ? "csv" : cleanFormat === "json" ? "json" : "md"}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+async function downloadRetrievalConfigBundle() {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/config-bundle/download`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载检索源配置包失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || "retrieval-config-bundle.json";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+function currentRetrievalConfigBundleText() {
+  return String(document.querySelector("[data-retrieval-config-bundle-input]")?.value ?? state.retrievalConfigBundleText ?? "");
+}
+
+function retrievalConfigBundlePayloadFromText(text) {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) throw new Error("Paste a config bundle JSON first.");
+  const parsed = JSON.parse(cleanText);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config bundle must be a JSON object.");
+  const bundle = parsed && typeof parsed === "object" && parsed.bundle && typeof parsed.bundle === "object" ? parsed.bundle : parsed;
+  return { bundle };
+}
+
+function retrievalConfigBundleResultMessage(result) {
+  const applied = Array.isArray(result?.applied) ? result.applied.length : 0;
+  const skipped = Array.isArray(result?.skipped) ? result.skipped.length : 0;
+  return result?.dry_run
+    ? `Dry-run checked: ${applied} would apply, ${skipped} skipped.`
+    : `Config bundle imported: ${applied} applied, ${skipped} skipped.`;
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function retrievalConfigBundleResultCsv(result) {
+  const headerLine = "result,source,status,action,reason,configured,dry_run,bundle_schema";
+  const headers = headerLine.split(",");
+  const applied = Array.isArray(result?.applied) ? result.applied : [];
+  const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+  const schema = result?.bundle_schema || "";
+  const dryRun = result?.dry_run ? "true" : "false";
+  const rows = [
+    ...applied.map((item) => ({
+      result: result?.dry_run ? "would_apply" : "applied",
+      source: item.source || "",
+      status: "applied",
+      action: item.action || (result?.dry_run ? "would_apply" : "applied"),
+      reason: "",
+      configured: item.configured === undefined ? "" : String(Boolean(item.configured)),
+      dry_run: dryRun,
+      bundle_schema: schema,
+    })),
+    ...skipped.map((item) => ({
+      result: "skipped",
+      source: item.source || "",
+      status: "skipped",
+      action: "",
+      reason: item.reason || "skipped",
+      configured: "",
+      dry_run: dryRun,
+      bundle_schema: schema,
+    })),
+  ];
+  return [
+    headerLine,
+    ...rows.map((row) => headers.map((header) => csvCell(row[header])).join(",")),
+  ].join("\n") + "\n";
+}
+
+function downloadTextFile(filename, content, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadRetrievalConfigBundleResultCsv() {
+  const result = state.retrievalConfigBundleResult;
+  if (!result) return;
+  const filename = result.dry_run
+    ? "retrieval-config-bundle-dry-run.csv"
+    : "retrieval-config-bundle-import-result.csv";
+  downloadTextFile(filename, retrievalConfigBundleResultCsv(result), "text/csv;charset=utf-8");
+}
+
+async function refreshRetrievalConfigViewsAfterBundleImport() {
+  state.retrievalReadiness = null;
+  state.retrievalReadinessMessage = "";
+  state.retrievalOnboarding = null;
+  state.retrievalOnboardingMessage = "";
+  await loadRetrievalSources({ silent: true });
+  await loadRetrievalLocalPaths({ silent: true });
+  await loadRetrievalHttpJsonConfig({ silent: true });
+  await loadRetrievalSqliteConfig({ silent: true });
+  await loadRetrievalManifestConfig({ silent: true });
+}
+
+async function dryRunRetrievalConfigBundleImport() {
+  if (!state.libraryId) return;
+  const text = currentRetrievalConfigBundleText();
+  try {
+    state.retrievalConfigBundleBusy = true;
+    state.retrievalConfigBundleText = text;
+    state.retrievalConfigBundleResult = null;
+    state.retrievalConfigBundleMessage = "";
+    renderAddItemModal();
+    const payload = retrievalConfigBundlePayloadFromText(text);
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/config-bundle?dry_run=1`, payload);
+    state.retrievalConfigBundleResult = data;
+    state.retrievalConfigBundleMessage = retrievalConfigBundleResultMessage(data);
+  } catch (error) {
+    state.retrievalConfigBundleResult = null;
+    state.retrievalConfigBundleMessage = error.message;
+  } finally {
+    state.retrievalConfigBundleBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function importRetrievalConfigBundle() {
+  if (!state.libraryId) return;
+  const text = currentRetrievalConfigBundleText();
+  try {
+    state.retrievalConfigBundleBusy = true;
+    state.retrievalConfigBundleText = text;
+    state.retrievalConfigBundleMessage = "";
+    renderAddItemModal();
+    const payload = retrievalConfigBundlePayloadFromText(text);
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/config-bundle`, payload);
+    state.retrievalConfigBundleResult = data;
+    state.retrievalConfigBundleMessage = retrievalConfigBundleResultMessage(data);
+    await refreshRetrievalConfigViewsAfterBundleImport();
+  } catch (error) {
+    state.retrievalConfigBundleResult = null;
+    state.retrievalConfigBundleMessage = error.message;
+  } finally {
+    state.retrievalConfigBundleBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function clearRetrievalConfigBundleDraft() {
+  state.retrievalConfigBundleText = "";
+  state.retrievalConfigBundleResult = null;
+  state.retrievalConfigBundleMessage = "";
+  renderAddItemModal();
+}
+
+function retrievalGateArtifactFallbackFilename(endpoint) {
+  const text = String(endpoint || "");
+  if (text.includes("/onboarding/package")) return "retrieval-onboarding-package.zip";
+  if (text.includes("/config-bundle/download")) return "retrieval-config-bundle.json";
+  if (text.includes("/readiness/report")) return "retrieval-readiness-report.md";
+  if (text.includes("/query-plan/report")) return "retrieval-query-plan.md";
+  if (text.includes("/tuning/report")) return "retrieval-tuning-report.md";
+  if (text.includes("/onboarding/report")) return "retrieval-onboarding-report.md";
+  if (text.includes("scope=sources")) return "retrieval-batch-report-sources.csv";
+  if (text.includes("/batches/")) return "retrieval-batch-report.md";
+  return "retrieval-artifact.dat";
+}
+
+async function downloadRetrievalGateArtifact(endpoint) {
+  const cleanEndpoint = String(endpoint || "").trim();
+  if (!state.libraryId || !cleanEndpoint) return;
+  if (!safeRetrievalEndpoint(cleanEndpoint)) {
+    state.retrievalOnboardingMessage = "Unsupported onboarding artifact endpoint.";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}${cleanEndpoint}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "Download onboarding artifact failed");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || retrievalGateArtifactFallbackFilename(cleanEndpoint);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalOnboardingMessage = error.message;
+    renderAddItemModal();
+  }
+}
+
+function downloadRetrievalOnboardingPackage() {
+  const query = String(document.querySelector("[data-retrieval-query-input]")?.value || state.retrievalQuery || "robot").trim() || "robot";
+  const params = new URLSearchParams({ query, sample_size: "2" });
+  applyRetrievalOnboardingQueryParams(params);
+  const endpoint = `/retrieval/onboarding/package?${params.toString()}`;
+  downloadRetrievalGateArtifact(endpoint);
+}
+
+async function downloadRetrievalOnboardingReport(format = "markdown") {
+  if (!state.libraryId) return;
+  const params = new URLSearchParams({ format: format || "markdown", query: state.retrievalQuery || "robot" });
+  applyRetrievalOnboardingQueryParams(params);
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/onboarding/report?${params.toString()}`);
+    if (!response.ok) {
+      const data = await parseJSONResponse(response);
+      throw new Error(data.error || "下载接入验收报告失败");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || "retrieval-onboarding-report.md";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    state.retrievalSourcesMessage = error.message;
     renderAddItemModal();
   }
 }
@@ -2235,10 +6873,66 @@ async function loadState() {
     state.attachmentEditorItemKey = "";
     state.selectedAttachmentKeys = new Set();
   }
-  document.querySelector("[data-unsynced]").textContent = `未同步 ${data.library.unsynced_count || 0}`;
+  const unsynced = document.querySelector("[data-unsynced]");
+  if (unsynced) unsynced.textContent = `未同步 ${data.library.unsynced_count || 0}`;
   applyFilters();
   renderDetail();
   rerenderActiveTagPopover();
+}
+
+async function loadRetrievalWorkspaceData() {
+  await loadRetrievalRuns({ silent: true });
+  await loadRetrievalSummary({ silent: true });
+  await loadRetrievalSources({ silent: true });
+  await loadRetrievalModelStatus({ silent: true });
+  await loadRetrievalLocalPaths({ silent: true });
+  await loadRetrievalHttpJsonTemplates({ silent: true });
+  await loadRetrievalHttpJsonConfig({ silent: true });
+  await loadRetrievalSqliteTemplates({ silent: true });
+  await loadRetrievalSqliteConfig({ silent: true });
+  await loadRetrievalManifestTemplates({ silent: true });
+  await loadRetrievalManifestConfig({ silent: true });
+  await loadRetrievalBatchJobs({ silent: true });
+}
+
+function setupRetrievalPage() {
+  const root = document.querySelector("[data-retrieval-page]");
+  if (!root) return;
+  state.libraryId = root.dataset.libraryId;
+  state.addItemMode = "retrieval";
+  loadState()
+    .then(() => {
+      renderRetrievalPage();
+      return loadRetrievalWorkspaceData();
+    })
+    .catch((error) => window.alert(error.message));
+}
+
+function setupApiConfigPage() {
+  const root = document.querySelector("[data-api-config-page]");
+  if (!root) return;
+  state.libraryId = root.dataset.libraryId;
+  const host = document.querySelector("[data-api-config-panel]");
+  host?.addEventListener("submit", (event) => {
+    if (event.target.matches("[data-api-config-form]")) saveApiConfig(event);
+  });
+  host?.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || !host.contains(button)) return;
+    if (button.matches("[data-save-api-config]")) {
+      const form = button.closest("[data-api-config-form]");
+      if (form) saveApiConfig({ preventDefault: () => {}, currentTarget: form });
+    } else if (button.matches("[data-toggle-api-config-secrets]")) {
+      state.apiConfigShowSecrets = !state.apiConfigShowSecrets;
+      loadApiConfig({ includeSecrets: state.apiConfigShowSecrets });
+    } else if (button.matches("[data-check-api-config]")) {
+      checkApiConfig(button.dataset.checkApiConfig);
+    }
+  });
+  loadApiConfig({ includeSecrets: false }).catch((error) => {
+    state.apiConfigMessage = error.message;
+    renderApiConfigPage();
+  });
 }
 
 function setupLibraryPage() {
@@ -2272,3 +6966,5 @@ function setupLibraryPage() {
 
 setupSourceForms();
 setupLibraryPage();
+setupRetrievalPage();
+setupApiConfigPage();

@@ -141,6 +141,12 @@ def _name_parts(name: str) -> ImportedCreator:
     return ImportedCreator(first_name=" ".join(parts[:-1]), last_name=parts[-1])
 
 
+def _xml_text(node: ET.Element | None) -> str:
+    if node is None:
+        return ""
+    return re.sub(r"\s+", " ", "".join(node.itertext())).strip()
+
+
 def _crossref_item(message: dict[str, Any], *, source: str = "Crossref") -> ImportedItem:
     fields = {
         "title": " ".join(message.get("title") or []) or "",
@@ -192,34 +198,40 @@ def parse_pubmed_xml(text: str) -> list[ImportedItem]:
         if article_node is None:
             continue
         fields: dict[str, str] = {}
-        title = "".join(article_node.findtext("./ArticleTitle") or "").strip()
+        title = _xml_text(article_node.find("./ArticleTitle"))
         if title:
             fields["title"] = title
         journal = article_node.find("./Journal")
         if journal is not None:
-            fields["publicationTitle"] = journal.findtext("./Title") or journal.findtext("./ISOAbbreviation") or ""
-            year = journal.findtext("./JournalIssue/PubDate/Year") or journal.findtext("./JournalIssue/PubDate/MedlineDate") or ""
+            fields["publicationTitle"] = _xml_text(journal.find("./Title")) or _xml_text(journal.find("./ISOAbbreviation"))
+            year = _xml_text(journal.find("./JournalIssue/PubDate/Year")) or _xml_text(journal.find("./JournalIssue/PubDate/MedlineDate"))
             if year:
                 fields["date"] = year[:4]
-        abstract = " ".join("".join(node.itertext()).strip() for node in article_node.findall("./Abstract/AbstractText") if "".join(node.itertext()).strip())
+        abstract = " ".join(value for value in (_xml_text(node) for node in article_node.findall("./Abstract/AbstractText")) if value)
         if abstract:
             fields["abstractNote"] = abstract
         ids: dict[str, str] = {}
-        pmid = medline.findtext("./PMID") if medline is not None else ""
+        pmid = _xml_text(medline.find("./PMID")) if medline is not None else ""
         if pmid:
             ids["pmid"] = normalize_pmid(pmid)
             fields["extra"] = f"PMID: {ids['pmid']}"
         for node in article.findall(".//ArticleId"):
             id_type = (node.attrib.get("IdType") or "").lower()
             if id_type == "doi":
-                ids["doi"] = normalize_doi(node.text or "")
+                ids["doi"] = normalize_doi(_xml_text(node))
                 fields["DOI"] = ids["doi"]
             if id_type == "pmc":
-                ids["pmcid"] = normalize_pmcid(node.text or "")
+                ids["pmcid"] = normalize_pmcid(_xml_text(node))
                 fields["extra"] = "\n".join(filter(None, [fields.get("extra", ""), f"PMCID: {ids['pmcid']}"]))
         creators = []
         for author in article_node.findall("./AuthorList/Author"):
-            creators.append(ImportedCreator(first_name=author.findtext("./ForeName") or "", last_name=author.findtext("./LastName") or ""))
+            first_name = _xml_text(author.find("./ForeName"))
+            last_name = _xml_text(author.find("./LastName"))
+            collective_name = _xml_text(author.find("./CollectiveName"))
+            if last_name:
+                creators.append(ImportedCreator(first_name=first_name, last_name=last_name))
+            elif collective_name:
+                creators.append(ImportedCreator(last_name=collective_name))
         values.append(ImportedItem(item_type="journalArticle", fields={k: v for k, v in fields.items() if v}, creators=creators, identifiers={k: v for k, v in ids.items() if v}, source="PubMed XML"))
     if not values:
         raise MetadataImportError("PubMed XML 中没有可导入的条目。")

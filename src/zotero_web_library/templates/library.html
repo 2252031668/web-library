@@ -11,6 +11,7 @@
     <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
     <button class="rail-btn active" title="文库">库</button>
     <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
+    <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
     <button class="rail-btn" title="设置" data-open-columns>设</button>
   </aside>
   <main class="workspace">
@@ -22,6 +23,8 @@
       <div class="topbar-actions">
         <span class="mode-pill {{ 'readonly' if library.mode == 'read_only_connection' else 'copy' }}">{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}</span>
         <span class="mode-pill" data-unsynced>未同步 0</span>
+        <a class="nav-action-btn" href="{{ url_for('features_page', library_id=library.library_id) }}">多源检索</a>
+        <a class="nav-action-btn" href="{{ url_for('api_config_page', library_id=library.library_id) }}">API 配置</a>
         <a class="nav-action-btn" href="{{ url_for('index') }}">源管理</a>
       </div>
     </header>

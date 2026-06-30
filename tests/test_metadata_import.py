@@ -97,6 +97,33 @@ def test_parse_csl_json_and_pubmed_xml() -> None:
     assert pubmed.identifiers["doi"] == "10.8888/pubmed"
 
 
+def test_parse_pubmed_xml_preserves_nested_title_abstract_and_collective_author() -> None:
+    pubmed = parse_pubmed_xml(
+        """
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>12345679</PMID>
+      <Article>
+        <ArticleTitle><i>SJD++</i>: Improved Speculative Jacobi Decoding.</ArticleTitle>
+        <Journal><ISOAbbreviation>IEEE TPAMI</ISOAbbreviation><JournalIssue><PubDate><MedlineDate>2026 Jan</MedlineDate></PubDate></JournalIssue></Journal>
+        <Abstract><AbstractText>Large <i>autoregressive</i> models.</AbstractText></Abstract>
+        <AuthorList><Author><CollectiveName>AI4S Consortium</CollectiveName></Author></AuthorList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData><ArticleIdList><ArticleId IdType="doi">10.1109/tpami.2026.3700227</ArticleId></ArticleIdList></PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+    )[0]
+
+    assert pubmed.fields["title"] == "SJD++: Improved Speculative Jacobi Decoding."
+    assert pubmed.fields["abstractNote"] == "Large autoregressive models."
+    assert pubmed.fields["publicationTitle"] == "IEEE TPAMI"
+    assert pubmed.fields["date"] == "2026"
+    assert pubmed.creators[0].last_name == "AI4S Consortium"
+
+
 def test_auto_import_text_rejects_unknown_content() -> None:
     with pytest.raises(MetadataImportError):
         parse_import_text("这不是引用格式", "auto")

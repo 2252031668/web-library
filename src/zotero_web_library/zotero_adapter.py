@@ -515,6 +515,36 @@ class ZoteroRepository:
         }
         return {key: value for key, value in values.items() if value}
 
+    def _complete_import_metadata(self, metadata: ImportedItem) -> ImportedItem:
+        fields = {key: str(value or "").strip() for key, value in metadata.fields.items() if str(value or "").strip()}
+        identifiers = self._metadata_identifiers(metadata)
+        if identifiers.get("doi") and not fields.get("DOI"):
+            fields["DOI"] = identifiers["doi"]
+        if identifiers.get("isbn") and not fields.get("ISBN"):
+            fields["ISBN"] = identifiers["isbn"]
+        extra_lines = [fields.get("extra", "")] if fields.get("extra") else []
+        existing_extra = fields.get("extra", "").casefold()
+        for key, label in {
+            "pmid": "PMID",
+            "pmcid": "PMCID",
+            "arxiv": "arXiv",
+            "ads_bibcode": "ADS Bibcode",
+        }.items():
+            value = identifiers.get(key, "")
+            line = f"{label}: {value}" if value else ""
+            if line and line.casefold() not in existing_extra:
+                extra_lines.append(line)
+        if extra_lines:
+            fields["extra"] = "\n".join(extra_lines)
+        return ImportedItem(
+            item_type=metadata.item_type,
+            fields=fields,
+            creators=metadata.creators,
+            tags=metadata.tags,
+            identifiers=identifiers,
+            source=metadata.source,
+        )
+
     def _existing_identifier_index(self, conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
         fields_by_item = self._fields_by_item(conn)
         rows = conn.execute(
@@ -542,6 +572,23 @@ class ZoteroRepository:
             for candidate in index.get(f"{kind}:{value}", []):
                 matches[candidate["key"]] = candidate
         return list(matches.values())
+
+    def existing_match_hints(self, metadata_items: list[ImportedItem]) -> list[dict[str, Any]]:
+        with self.read_conn() as conn:
+            index = self._existing_identifier_index(conn)
+        hints: list[dict[str, Any]] = []
+        for metadata in metadata_items:
+            matches: dict[str, dict[str, Any]] = {}
+            identifiers = self._metadata_identifiers(metadata)
+            for kind, value in identifiers.items():
+                for candidate in index.get(f"{kind}:{value}", []):
+                    match = matches.setdefault(
+                        candidate["key"],
+                        {key: item for key, item in candidate.items() if key != "item_id"} | {"matched_identifiers": []},
+                    )
+                    match["matched_identifiers"].append({"kind": kind, "value": value})
+            hints.append({"identifiers": identifiers, "matches": list(matches.values())})
+        return hints
 
     def _collection_id_for_key(self, conn: sqlite3.Connection, collection_key: str | None) -> int | None:
         if not collection_key:
@@ -982,7 +1029,8 @@ class ZoteroRepository:
         results: list[dict[str, Any]] = []
         with self.write_conn() as conn:
             collection_id = self._collection_id_for_key(conn, collection_key)
-            for metadata in metadata_items:
+            for raw_metadata in metadata_items:
+                metadata = self._complete_import_metadata(raw_metadata)
                 candidates = self._dedupe_candidates(conn, metadata)
                 if len(candidates) == 1:
                     self._attach_item_to_collection_id(conn, int(candidates[0]["item_id"]), collection_id)
