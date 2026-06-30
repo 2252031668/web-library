@@ -59,6 +59,20 @@ AI 不直接入库，只辅助生成 query、排序和默认勾选。
 8. 点“全选 AI 推荐”，再点“导入所选”。
 9. 下载汇总报告，检查证据链。
 
+## 演示截图
+
+API 配置页：
+
+![API 配置页](screenshots/api-config.png)
+
+多源检索页：
+
+![多源检索页](screenshots/multi-source-retrieval.png)
+
+候选结果区：
+
+![候选结果区](screenshots/retrieval-candidates.png)
+
 ## 直接检索和计划检索的区别
 
 - 直接检索：只用输入框里的关键词跑一次，速度最快，适合快速查一个明确词。
@@ -80,3 +94,31 @@ git diff --check
 - GitHub、HuggingFace、Zenodo token 可选，未配置时检索公开资源。
 - AI 评估只发送候选元数据，不发送 provider raw JSON。
 - AI 判断只影响排序和默认勾选，最终是否入库仍由用户决定。
+
+## 建议 PR 描述
+
+```markdown
+## Summary
+
+新增 AI 辅助多源异构检索闭环：API 配置页、GitHub/HuggingFace/Zenodo 数据源、AI 检索计划、候选 AI 判断、批量检索候选汇总，以及导入前人工确认。
+
+## 使用流程
+
+1. 在 API 配置页填写模型名称、请求地址、API Key。
+2. 进入多源检索页，输入关键词。
+3. 选择直接检索，或先生成 AI 检索计划再批量检索。
+4. 在候选区查看资料类型、来源命中、AI 判断、入库字段预览。
+5. 点击“全选 AI 推荐”或手动勾选，再导入所选。
+
+## 截图
+
+- API 配置页：`docs/screenshots/api-config.png`
+- 多源检索页：`docs/screenshots/multi-source-retrieval.png`
+- 候选结果区：`docs/screenshots/retrieval-candidates.png`
+
+## 验证
+
+- `node --check src/zotero_web_library/static/app.js`
+- `.venv\Scripts\python.exe -m pytest`
+- `git diff --check`
+```

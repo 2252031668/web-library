@@ -917,4 +917,8 @@ def test_ai_retrieval_review_guide_documents_review_flow() -> None:
     assert "快速模式" in guide
     assert "全量模式" in guide
     assert "Zotero 字段预览" in guide
+    assert "screenshots/api-config.png" in guide
+    assert "screenshots/multi-source-retrieval.png" in guide
+    assert "screenshots/retrieval-candidates.png" in guide
+    assert "建议 PR 描述" in guide
     assert "node --check src/zotero_web_library/static/app.js" in guide
