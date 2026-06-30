@@ -176,6 +176,7 @@ const state = {
   simplePlanBatchJobId: "",
   simplePlanBatchLoadedJobId: "",
   simplePlanBatchCandidatesBusy: false,
+  retrievalBatchMode: "quick",
   retrievalSimpleBatchLimit: 5,
   retrievalSimpleSourceLimits: {},
   citationExportFormat: "bibtex",
@@ -792,6 +793,117 @@ function retrievalAiRiskLabel(risk) {
   return "中风险";
 }
 
+const SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE = {
+  quick: {
+    default: 4,
+    crossref: 5,
+    arxiv: 5,
+    pubmed: 5,
+    semanticscholar: 5,
+    datacite: 4,
+    github: 2,
+    huggingface: 2,
+    zenodo: 3,
+    localfile: 5,
+    httpjson: 5,
+    sqlite: 5,
+    manifest: 5,
+  },
+  full: {
+    default: 8,
+    crossref: 10,
+    arxiv: 10,
+    pubmed: 10,
+    semanticscholar: 10,
+    datacite: 8,
+    github: 5,
+    huggingface: 5,
+    zenodo: 6,
+    localfile: 10,
+    httpjson: 10,
+    sqlite: 10,
+    manifest: 10,
+  },
+};
+
+function retrievalCandidateItemType(candidate) {
+  const item = candidate.item || {};
+  const fields = item.fields || {};
+  const raw = candidate.item_type || item.item_type || item.itemType || fields.itemType || fields.item_type || candidate.type || "";
+  const normalized = ITEM_TYPE_ALIASES[raw] || raw;
+  return String(normalized || "").trim();
+}
+
+function retrievalCandidateTypeMeta(candidate) {
+  const itemType = retrievalCandidateItemType(candidate);
+  const source = String(candidate.source || "").toLowerCase();
+  const meta = ITEM_TYPE_META[itemType] || {};
+  let label = meta.labelZh || itemType || "资料";
+  let group = meta.group || "other";
+  if (["journalArticle", "conferencePaper", "preprint", "thesis"].includes(itemType)) {
+    label = "论文";
+    group = "paper";
+  } else if (itemType === "computerProgram") {
+    label = "代码/软件";
+    group = "code";
+  } else if (itemType === "dataset") {
+    label = "数据集";
+    group = "dataset";
+  } else if (itemType === "report") {
+    label = "报告";
+    group = "report";
+  } else if (source === "github") {
+    label = "代码/软件";
+    group = "code";
+  } else if (source === "huggingface") {
+    label = itemType === "dataset" ? "数据集" : "模型/代码";
+    group = itemType === "dataset" ? "dataset" : "code";
+  }
+  return {
+    itemType,
+    label,
+    group,
+    zoteroLabel: meta.labelZh || itemType || "未识别",
+  };
+}
+
+function retrievalShortText(value, limit = 140) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function renderRetrievalSourceHits(sources) {
+  const unique = [...new Set((sources || []).filter(Boolean))];
+  if (!unique.length) return "";
+  const label = unique.length > 1 ? `多源命中：${unique.join(" / ")}` : `来源：${unique[0]}`;
+  return `<span class="retrieval-source-hits">${escapeHtml(label)}</span>`;
+}
+
+function renderRetrievalZoteroPreview(candidate) {
+  const item = candidate.item || {};
+  const fields = item.fields || {};
+  const identifiers = candidate.identifiers || item.identifiers || {};
+  const typeMeta = retrievalCandidateTypeMeta(candidate);
+  const rows = [
+    ["资料类型", `${typeMeta.label} / Zotero: ${typeMeta.zoteroLabel}`],
+    ["标题", fields.title || candidate.title],
+    ["作者", retrievalCreatorLine(candidate)],
+    ["DOI", fields.DOI || identifiers.doi || identifiers.DOI],
+    ["摘要", fields.abstractNote || candidate.abstract],
+    ["URL", fields.url || candidate.landing_url || candidate.url],
+  ]
+    .map(([label, value]) => [label, retrievalShortText(value, label === "摘要" ? 180 : 120)])
+    .filter(([, value]) => value);
+  if (!rows.length) return "";
+  return `<details class="retrieval-zotero-preview">
+    <summary>入库字段预览</summary>
+    <span class="retrieval-zotero-preview-grid">
+      ${rows.map(([label, value]) => `<span><strong>${escapeHtml(label)}</strong><em>${escapeHtml(value)}</em></span>`).join("")}
+    </span>
+  </details>`;
+}
+
 function renderCandidateAiEvaluation(candidate) {
   const ai = candidate.ai_evaluation || null;
   if (!ai || !ai.decision) return "";
@@ -872,6 +984,7 @@ function renderRetrievalCandidates() {
         ? candidate.sources
         : [source, ...(candidate.also_seen_in || [])].filter(Boolean);
       const sourceLabel = sources.length > 1 ? `多源 ${sources.join(" / ")}` : source;
+      const typeMeta = retrievalCandidateTypeMeta(candidate);
       const title = candidate.title || candidate.item?.fields?.title || "未命名候选";
       const year = candidate.year || "";
       const venue = candidate.venue || "";
@@ -904,12 +1017,17 @@ function renderRetrievalCandidates() {
         <span class="retrieval-candidate-body">
           <span class="retrieval-title-row">
             <strong>${escapeHtml(title)}</strong>
-            <em>${escapeHtml(sourceLabel)}</em>
+            <span class="retrieval-title-tags">
+              <span class="retrieval-type-pill ${escapeHtml(typeMeta.group)}">${escapeHtml(typeMeta.label)}</span>
+              <em>${escapeHtml(sourceLabel)}</em>
+            </span>
           </span>
+          ${renderRetrievalSourceHits(sources)}
           ${rankLabel || confidenceLabel || rankReasons || multiSourceBadge ? `<span class="retrieval-rank-row">${rankLabel ? `<span>${escapeHtml(rankLabel)}</span>` : ""}${confidenceLabel ? `<span>${escapeHtml(confidenceLabel)}</span>` : ""}${multiSourceBadge}${rankReasons}</span>` : ""}
           ${duplicateHint ? `<span class="retrieval-duplicate ${escapeHtml(duplicateHint.status || "")}">${escapeHtml(duplicateHint.message || "文库已有匹配条目")}${duplicateMatches ? `：${escapeHtml(duplicateMatches)}` : ""}</span>` : ""}
           ${similarityHint ? `<span class="retrieval-similarity">${escapeHtml(similarityHint.message || "文库存在疑似相似条目")}${similarityMatches ? `：${escapeHtml(similarityMatches)}` : ""}</span>` : ""}
           ${renderCandidateAiEvaluation(candidate)}
+          ${renderRetrievalZoteroPreview(candidate)}
           <span class="retrieval-meta">${escapeHtml([creators, year, venue].filter(Boolean).join(" · "))}</span>
           ${badges ? `<span class="retrieval-badges">${badges}</span>` : ""}
           ${abstract ? `<span class="retrieval-abstract">${escapeHtml(abstract.slice(0, 260))}${abstract.length > 260 ? "..." : ""}</span>` : ""}
@@ -2185,10 +2303,22 @@ function currentSimpleBatchLimitFromInput(value) {
   return Math.max(1, Math.min(Number.isFinite(numeric) ? Math.round(numeric) : 5, 20));
 }
 
+function currentSimpleBatchMode() {
+  return state.retrievalBatchMode === "full" ? "full" : "quick";
+}
+
+function defaultSimpleSourceLimit(source) {
+  const mode = currentSimpleBatchMode();
+  const table = SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE[mode] || SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE.quick;
+  const key = String(source || "").trim().toLowerCase();
+  return currentSimpleBatchLimitFromInput(table[key] || table.default || state.retrievalSimpleBatchLimit || 5);
+}
+
 function currentSimpleSourceLimit(source) {
   const limits = state.retrievalSimpleSourceLimits || {};
   const key = String(source || "").trim().toLowerCase();
-  return currentSimpleBatchLimitFromInput(limits[key] || state.retrievalSimpleBatchLimit || 5);
+  if (Object.prototype.hasOwnProperty.call(limits, key)) return currentSimpleBatchLimitFromInput(limits[key]);
+  return defaultSimpleSourceLimit(key);
 }
 
 function simplePlanBatchSourceLimits(sources) {
@@ -2204,10 +2334,16 @@ function renderSimplePlanSourceLimits() {
   const sourceSelection = simplePlanBatchSourceSelection();
   const sources = sourceSelection.selected;
   if (!sources.length) return "";
+  const mode = currentSimpleBatchMode();
   return `<div class="simple-plan-source-limits">
     <div>
       <strong>每个源取多少条</strong>
       <span>数量越小越快；论文源可稍大，代码/模型/数据源建议小一点。</span>
+    </div>
+    <div class="simple-plan-mode-toggle" aria-label="计划检索模式">
+      <button type="button" data-simple-batch-mode="quick" class="${mode === "quick" ? "active" : ""}">快速模式</button>
+      <button type="button" data-simple-batch-mode="full" class="${mode === "full" ? "active" : ""}">全量模式</button>
+      <span>${mode === "quick" ? "默认减少 GitHub/HuggingFace/Zenodo 数量，适合演示和快速判断。" : "每源取更多候选，覆盖更全但会更慢。"}</span>
     </div>
     <div class="simple-plan-source-limit-grid">
       ${sources.map((source) => {
@@ -2298,6 +2434,7 @@ function renderSimpleAiQueryPlan() {
         <em>${index + 1}</em>
         <div>
           <strong>${escapeHtml(item.query || "")}</strong>
+          ${item.intent ? `<small>意图：${escapeHtml(item.intent)}</small>` : ""}
           <span>${escapeHtml(item.model_reason || item.reason || "用于覆盖不同数据源表达方式")}</span>
           ${(item.sources || []).length ? `<small>推荐源：${escapeHtml((item.sources || []).join(" / "))}</small>` : ""}
         </div>
@@ -2841,6 +2978,14 @@ function bindRetrievalPageEvents(host) {
       draftRetrievalBatchQueries({ limit: 5 });
     }
     else if (button.matches("[data-simple-plan-batch]")) submitSimpleRetrievalPlanBatch();
+    else if (button.matches("[data-simple-batch-mode]")) {
+      state.retrievalBatchMode = button.dataset.simpleBatchMode === "full" ? "full" : "quick";
+      state.retrievalSimpleSourceLimits = {};
+      state.retrievalBatchMessage = state.retrievalBatchMode === "full"
+        ? "已切换到全量模式：每源候选更多，检索会更慢。"
+        : "已切换到快速模式：代码/模型/数据源默认取更少候选。";
+      renderRetrievalPage();
+    }
     else if (button.matches("[data-load-simple-batch-candidates]")) loadSimplePlanBatchCandidates(button.dataset.loadSimpleBatchCandidates);
     else if (button.matches("[data-draft-retrieval-batch-queries]")) draftRetrievalBatchQueries();
     else if (button.matches("[data-refresh-retrieval-batches]")) loadRetrievalBatchJobs();
@@ -3171,7 +3316,7 @@ async function submitSimpleRetrievalPlanBatch() {
   }
   try {
     state.retrievalBatchBusy = true;
-    state.retrievalBatchMessage = "";
+    state.retrievalBatchMessage = `正在创建计划检索任务（${currentSimpleBatchMode() === "full" ? "全量模式" : "快速模式"}）...`;
     state.simplePlanBatchLoadedJobId = "";
     state.retrievalCandidates = [];
     state.retrievalSelectedKeys = new Set();
@@ -3188,7 +3333,7 @@ async function submitSimpleRetrievalPlanBatch() {
     state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
     const sourceNote = sourceSelection.recommended ? `使用计划推荐源：${sources.join(" / ")}` : `使用已勾选源：${sources.join(" / ")}`;
     const limitNote = Object.entries(sourceLimits).map(([source, limit]) => `${retrievalSourceLabel(source)} ${limit}`).join(" / ");
-    state.retrievalBatchMessage = `已按计划创建批量检索：${data.job.completed_queries || 0}/${data.job.total_queries || 0}，${sourceNote}，每源数量：${limitNote || batchLimit}，完成后会显示到下方。`;
+    state.retrievalBatchMessage = `已按计划创建批量检索（${currentSimpleBatchMode() === "full" ? "全量模式" : "快速模式"}）：${data.job.completed_queries || 0}/${data.job.total_queries || 0}，${sourceNote}，每源数量：${limitNote || batchLimit}，完成后会显示到下方候选结果。`;
     await loadRetrievalBatchJobs({ silent: true });
     await loadRetrievalRuns({ silent: true });
     await loadRetrievalSummary({ silent: true });

@@ -219,9 +219,18 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "function simplePlanBatchSourceSelection" in app_js
     assert "retrievalSimpleBatchLimit" in app_js
     assert "retrievalSimpleSourceLimits" in app_js
+    assert "retrievalBatchMode" in app_js
+    assert "data-simple-batch-mode" in app_js
+    assert "快速模式" in app_js
+    assert "全量模式" in app_js
+    assert "意图：" in app_js
     assert "data-simple-source-limit" in app_js
     assert "function simplePlanBatchSourceLimits" in app_js
     assert "function loadSimplePlanBatchCandidates" in app_js
+    assert "function retrievalCandidateTypeMeta" in app_js
+    assert "function renderRetrievalZoteroPreview" in app_js
+    assert "retrieval-type-pill" in app_js
+    assert "retrieval-zotero-preview" in app_js
     assert "data-load-simple-batch-candidates" in app_js
     assert "/candidates?${params.toString()}" in app_js
     assert "function currentSimpleBatchLimit" in app_js
@@ -583,6 +592,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".retrieval-advanced-section" in app_css
     assert ".retrieval-candidates" in app_css
     assert ".retrieval-candidate" in app_css
+    assert ".retrieval-type-pill" in app_css
+    assert ".retrieval-zotero-preview" in app_css
+    assert ".simple-plan-mode-toggle" in app_css
     assert ".retrieval-stats" in app_css
     assert ".retrieval-actions" in app_css
     assert ".retrieval-local-config" in app_css
@@ -894,3 +906,15 @@ def test_library_api_config_page_mounts_config_workspace(
     assert "data-api-config-page" in html
     assert "data-api-config-panel" in html
     assert "多源检索" in html
+
+
+def test_ai_retrieval_review_guide_documents_review_flow() -> None:
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "docs" / "ai-assisted-retrieval-review-guide.md").read_text(encoding="utf-8")
+
+    assert "AI 辅助多源异构检索闭环" in guide
+    assert "直接检索和计划检索的区别" in guide
+    assert "快速模式" in guide
+    assert "全量模式" in guide
+    assert "Zotero 字段预览" in guide
+    assert "node --check src/zotero_web_library/static/app.js" in guide

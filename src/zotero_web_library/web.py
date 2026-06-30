@@ -4506,6 +4506,137 @@ def retrieval_query_plan_related_terms(seed_query: str) -> set[str]:
     return terms
 
 
+def retrieval_query_plan_expansion_hints(seed_query: str) -> list[dict[str, Any]]:
+    clean_seed = re.sub(r"\s+", " ", str(seed_query or "").strip())
+    seed_lower = clean_seed.casefold()
+    if not clean_seed:
+        return []
+    if "speculative" in seed_lower and ("decoding" in seed_lower or "sampling" in seed_lower):
+        return [
+            {
+                "intent": "core_concept",
+                "query": "speculative decoding",
+                "terms": ["speculative decoding", "推测解码"],
+                "sources": ["crossref", "arxiv", "semanticscholar", "github"],
+            },
+            {
+                "intent": "method_alias",
+                "query": "assisted generation draft model verification",
+                "terms": ["assisted generation", "draft model", "verify", "草稿模型", "验证采样"],
+                "sources": ["arxiv", "semanticscholar", "github", "huggingface"],
+            },
+            {
+                "intent": "system_name",
+                "query": "Medusa EAGLE speculative decoding",
+                "terms": ["Medusa", "EAGLE", "speculative decoding"],
+                "sources": ["arxiv", "semanticscholar", "github"],
+            },
+            {
+                "intent": "benchmark",
+                "query": "speculative decoding benchmark latency acceptance rate",
+                "terms": ["benchmark", "latency", "acceptance rate", "throughput"],
+                "sources": ["arxiv", "semanticscholar", "huggingface", "github"],
+            },
+            {
+                "intent": "code_data",
+                "query": "speculative decoding implementation inference acceleration",
+                "terms": ["implementation", "inference acceleration", "LLM serving"],
+                "sources": ["github", "huggingface", "zenodo"],
+            },
+        ]
+    if any(term in seed_lower for term in ["llm", "language model", "transformer", "decoding", "generation"]):
+        return [
+            {
+                "intent": "core_concept",
+                "query": clean_seed,
+                "terms": retrieval_query_plan_terms(clean_seed),
+                "sources": ["crossref", "arxiv", "semanticscholar"],
+            },
+            {
+                "intent": "method_alias",
+                "query": f"{clean_seed} inference optimization",
+                "terms": ["inference", "optimization", "serving", "latency"],
+                "sources": ["arxiv", "semanticscholar", "github"],
+            },
+            {
+                "intent": "benchmark",
+                "query": f"{clean_seed} benchmark evaluation",
+                "terms": ["benchmark", "evaluation", "leaderboard"],
+                "sources": ["huggingface", "github", "zenodo", "datacite"],
+            },
+            {
+                "intent": "code_data",
+                "query": f"{clean_seed} implementation dataset",
+                "terms": ["implementation", "dataset", "model"],
+                "sources": ["github", "huggingface", "zenodo"],
+            },
+        ]
+    if any(term in seed_lower for term in ["graph", "gnn", "protein", "molecule", "catalyst"]):
+        return [
+            {
+                "intent": "core_concept",
+                "query": clean_seed,
+                "terms": retrieval_query_plan_terms(clean_seed),
+                "sources": ["crossref", "arxiv", "semanticscholar"],
+            },
+            {
+                "intent": "benchmark",
+                "query": f"{clean_seed} benchmark",
+                "terms": ["benchmark", "screening", "evaluation"],
+                "sources": ["huggingface", "github", "zenodo", "datacite"],
+            },
+            {
+                "intent": "data",
+                "query": f"{clean_seed} dataset",
+                "terms": ["dataset", "molecule", "materials", "protein"],
+                "sources": ["datacite", "zenodo", "huggingface"],
+            },
+            {
+                "intent": "model_code",
+                "query": f"{clean_seed} model code",
+                "terms": ["model", "code", "implementation"],
+                "sources": ["github", "huggingface"],
+            },
+        ]
+    return [
+        {
+            "intent": "core_concept",
+            "query": clean_seed,
+            "terms": retrieval_query_plan_terms(clean_seed),
+            "sources": ["crossref", "arxiv", "semanticscholar"],
+        },
+        {
+            "intent": "survey",
+            "query": f"{clean_seed} survey",
+            "terms": ["survey", "review", "overview"],
+            "sources": ["crossref", "arxiv", "semanticscholar"],
+        },
+        {
+            "intent": "benchmark",
+            "query": f"{clean_seed} benchmark",
+            "terms": ["benchmark", "evaluation"],
+            "sources": ["huggingface", "github", "zenodo", "datacite"],
+        },
+        {
+            "intent": "code_data",
+            "query": f"{clean_seed} implementation dataset",
+            "terms": ["implementation", "dataset", "code"],
+            "sources": ["github", "huggingface", "zenodo"],
+        },
+    ]
+
+
+def retrieval_query_plan_expansion_terms(seed_query: str) -> set[str]:
+    terms: set[str] = set()
+    for hint in retrieval_query_plan_expansion_hints(seed_query):
+        if not isinstance(hint, dict):
+            continue
+        terms.update(term for term in retrieval_query_plan_terms(hint.get("query")) if len(term) >= 2)
+        for value in hint.get("terms") or []:
+            terms.update(term for term in retrieval_query_plan_terms(value) if len(term) >= 2)
+    return terms
+
+
 def retrieval_query_plan_seed_variants(seed_query: str, sources: list[str], limit: int) -> list[dict[str, Any]]:
     clean_seed = re.sub(r"\s+", " ", str(seed_query or "").strip())
     if not clean_seed:
@@ -4569,6 +4700,7 @@ def retrieval_query_plan_ai_messages(
         "seed_query": seed_query,
         "core_seed_terms": retrieval_query_plan_terms(seed_query),
         "related_terms": sorted(retrieval_query_plan_related_terms(seed_query))[:30],
+        "expansion_hints": retrieval_query_plan_expansion_hints(seed_query),
         "rule_queries": task_queries,
         "sources": [
             {
@@ -4584,7 +4716,8 @@ def retrieval_query_plan_ai_messages(
             "queries": [
                 {
                     "query": "3 to 6 concise search terms; must preserve the seed_query topic",
-                    "reason": "why this query helps one source category",
+                    "reason": "why this query helps one source category and intent",
+                    "intent": "core_concept | method_alias | benchmark | data | code | bilingual",
                     "sources": ["optional exact source names from sources"],
                 }
             ],
@@ -4594,6 +4727,8 @@ def retrieval_query_plan_ai_messages(
             "Return 3 to 5 high-signal queries.",
             "Use real neighboring concepts, aliases, methods, evaluation terms, or system names; do not only append generic words like paper, code, dataset.",
             "Every query should include a core_seed_terms token or a term from related_terms.",
+            "Use expansion_hints to cover distinct intents: core concept, method/alias, benchmark/evaluation, code/model, and dataset/source discovery.",
+            "For Chinese/English bilingual terms, include them only when they are direct translations or common aliases of the seed topic.",
             "Prefer one broad query, one method/alias query, one evaluation/benchmark query, one implementation query, and one data/model query when sources support them.",
             "Do not copy sample titles that are unrelated to seed_query.",
             "Do not add facts, identifiers, URLs, or source names that are not in the payload.",
@@ -4606,7 +4741,8 @@ def retrieval_query_plan_ai_messages(
                 "You refine user search text into a small heterogeneous retrieval plan. "
                 "Return only JSON. Do not invent credentials, URLs, source paths, paper facts, or IDs. "
                 "Keep the user's seed_query as the anchor for every query. "
-                "Use source samples only as weak evidence; ignore samples that are not about the seed_query."
+                "Use source samples only as weak evidence; ignore samples that are not about the seed_query. "
+                "Prefer concept expansion over suffix-only variants such as '<seed> paper' or '<seed> code'."
             ),
         },
         {"role": "user", "content": json.dumps(task, ensure_ascii=False)},
@@ -4702,8 +4838,10 @@ def apply_retrieval_query_plan_ai_enhancement(
     enhancement["suggested_query_count"] = len(raw_queries)
     allowed_terms = retrieval_query_plan_ai_terms(seed_query, queries)
     allowed_terms.update(retrieval_query_plan_related_terms(seed_query))
+    allowed_terms.update(retrieval_query_plan_expansion_terms(seed_query))
     seed_terms = {term.casefold() for term in retrieval_query_plan_terms(seed_query)}
     related_terms = {term.casefold() for term in retrieval_query_plan_related_terms(seed_query)}
+    related_terms.update(term.casefold() for term in retrieval_query_plan_expansion_terms(seed_query))
     source_names = {str(source.get("source") or "") for source in sources if isinstance(source, dict)}
     seen = {retrieval_query_coverage_key(item.get("query")) for item in queries if isinstance(item, dict)}
     accepted: list[dict[str, Any]] = []
@@ -4737,6 +4875,7 @@ def apply_retrieval_query_plan_ai_enhancement(
                 "sources": item_sources,
                 "evidence": [],
                 "ai": True,
+                "intent": str(raw_item.get("intent") or "")[:80] if isinstance(raw_item, dict) else "",
                 "model_reason": str(raw_item.get("reason") or "")[:240] if isinstance(raw_item, dict) else "",
             }
         )

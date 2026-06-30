@@ -2728,6 +2728,51 @@ button, input, select {
   text-transform: uppercase;
 }
 
+.retrieval-title-tags {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.retrieval-type-pill {
+  border: 1px solid #cfe0f3;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #0f3b57;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+
+.retrieval-type-pill.paper {
+  background: #eef7ff;
+  border-color: #bdd4ea;
+}
+
+.retrieval-type-pill.code {
+  background: #f1f5ff;
+  border-color: #c7d2fe;
+}
+
+.retrieval-type-pill.dataset {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+
+.retrieval-type-pill.report {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.retrieval-source-hits {
+  color: #0f3b57;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .retrieval-meta,
 .retrieval-abstract,
 .retrieval-empty,
@@ -2793,6 +2838,46 @@ button, input, select {
 .retrieval-badges span {
   background: #eef7ff;
   color: #0f3b57;
+}
+
+.retrieval-zotero-preview {
+  border: 1px dashed #cfe0f3;
+  border-radius: 8px;
+  background: #ffffff;
+  margin-top: 4px;
+  padding: 8px 10px;
+}
+
+.retrieval-zotero-preview summary {
+  color: #0f3b57;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.retrieval-zotero-preview-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-top: 8px;
+}
+
+.retrieval-zotero-preview-grid span {
+  display: grid;
+  gap: 2px;
+}
+
+.retrieval-zotero-preview-grid strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.retrieval-zotero-preview-grid em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .retrieval-empty {
@@ -3834,6 +3919,36 @@ button, input, select {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.simple-plan-mode-toggle {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.simple-plan-mode-toggle button {
+  border: 1px solid #cfe0f3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f3b57;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 32px;
+  padding: 5px 10px;
+}
+
+.simple-plan-mode-toggle button.active {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+}
+
+.simple-plan-mode-toggle span {
+  flex: 1 1 220px;
 }
 
 .simple-plan-source-limit-grid {

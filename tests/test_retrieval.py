@@ -1817,6 +1817,7 @@ def test_retrieval_query_plan_can_use_ai_pixel_enhancement(
                                     {
                                         "query": "robot catalyst kinetics",
                                         "reason": "supported by robot catalyst evidence",
+                                        "intent": "method_alias",
                                         "sources": ["localfile"],
                                     },
                                     {"query": "unrelated astronomy", "reason": "not supported"},
@@ -1842,11 +1843,19 @@ def test_retrieval_query_plan_can_use_ai_pixel_enhancement(
     assert calls
     assert calls[0]["url"] == "https://ai-pixel.online/v1/chat/completions"
     assert calls[0]["headers"] == {"Authorization": "Bearer secret-ai-key"}
+    model_payload = calls[0]["payload"]
+    assert isinstance(model_payload, dict)
+    messages = model_payload["messages"]
+    task = json.loads(messages[1]["content"])
+    assert task["expansion_hints"]
+    assert {hint["intent"] for hint in task["expansion_hints"]} >= {"core_concept", "benchmark"}
+    assert "Use real neighboring concepts" in " ".join(task["planning_rules"])
     assert plan["ai_enhancement"]["status"] == "applied"
     assert plan["ai_enhancement"]["suggested_query_count"] == 3
     assert plan["ai_enhancement"]["accepted_query_count"] == 1
     assert plan["queries"][0]["query"] == "robot catalyst kinetics"
     assert plan["queries"][0]["ai"] is True
+    assert plan["queries"][0]["intent"] == "method_alias"
     assert "robot catalyst kinetics" in plan["query_text"]
     assert {item["reason"] for item in plan["ai_enhancement"]["rejected"]} == {
         "query terms not supported by seed or evidence",
@@ -1892,6 +1901,10 @@ def test_retrieval_query_plan_ignores_unrelated_source_samples(
     assert "speculative sampling verification" in planned_queries
     assert "llm inference acceleration" in planned_queries
     assert "assisted generation draft verify" in planned_queries
+    hint_terms = web.retrieval_query_plan_expansion_terms("speculative decoding")
+    assert "推测解码" in hint_terms
+    assert "medusa" in hint_terms
+    assert "eagle" in hint_terms
 
 
 def test_retrieval_query_plan_api_reports_unconfigured_ai_without_key(
