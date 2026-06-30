@@ -1,0 +1,2 @@
+local_id,title,authors,year,doi,abstract,keywords,item_type,url
+CSV-AI4S-001,AI4S Retrieval Benchmark Dataset,Cjh Zhang; Ada Lovelace,2026,10.6060/AI4S-BENCHMARK,AI4S retrieval benchmark for heterogeneous literature ingestion.,AI4S; retrieval; dataset,dataset,https://example.test/ai4s/benchmark

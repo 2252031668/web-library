@@ -298,6 +298,31 @@ def test_import_metadata_creates_native_item_and_adds_to_collection(
     assert any(collection["key"] == "COLL0001" for collection in item["collections"])
 
 
+def test_import_metadata_backfills_identifier_fields_before_writing(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    summary = repo.import_metadata_items(
+        [
+            ImportedItem(
+                item_type="preprint",
+                fields={"title": "Identifier Only Import"},
+                identifiers={"doi": "https://doi.org/10.4242/BACKFILL", "arxiv": "2406.09246v2", "pmid": "12345678"},
+                source="test",
+            )
+        ],
+    )
+
+    item = next(item for item in repo.state()["items"] if item["key"] == summary["results"][0]["item_key"])
+    assert item["fields"]["DOI"] == "10.4242/backfill"
+    assert "arXiv: 2406.09246" in item["fields"]["extra"]
+    assert "PMID: 12345678" in item["fields"]["extra"]
+    assert summary["results"][0]["identifiers"]["doi"] == "10.4242/backfill"
+
+
 def test_import_metadata_reuses_existing_strong_identifier_without_creating_duplicate(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -6,5 +6,7 @@ app-data/
 *.pyc
 *.egg-info/
 server-*.log
+server.log
+server.err.log
 .env
 .DS_Store

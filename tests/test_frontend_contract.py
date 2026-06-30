@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from zotero_web_library.sources import create_local_copy
 from zotero_web_library.web import create_app
 
 
@@ -21,6 +24,7 @@ def test_source_index_contains_service_path_and_upload_contracts() -> None:
     assert "进入文库" in index_html
     assert "当前选择目录" in index_html
     assert "子目录" in index_html
+    assert "features_page" not in index_html
     assert "data-upload-progress" in index_html
     assert "data-server-path-modal" in index_html
     assert "Standalone Zotero Web Library" not in index_html
@@ -46,9 +50,11 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     app_js = (root / "src" / "zotero_web_library" / "static" / "app.js").read_text(encoding="utf-8")
     app_css = (root / "src" / "zotero_web_library" / "static" / "app.css").read_text(encoding="utf-8")
     library_html = (root / "src" / "zotero_web_library" / "templates" / "library.html").read_text(encoding="utf-8")
+    api_config_html = (root / "src" / "zotero_web_library" / "templates" / "api_config.html").read_text(encoding="utf-8")
     reader_html = (root / "src" / "zotero_web_library" / "templates" / "reader.html").read_text(encoding="utf-8")
     reader_js = (root / "src" / "zotero_web_library" / "static" / "reader.js").read_text(encoding="utf-8")
     reader_css = (root / "src" / "zotero_web_library" / "static" / "reader.css").read_text(encoding="utf-8")
+    features_html = (root / "src" / "zotero_web_library" / "templates" / "features.html").read_text(encoding="utf-8")
     assert "data-current-tag-toggle" in app_js
     assert "data-shortcut-add-tag" in app_js
     assert "data-shortcut-form" in app_js
@@ -98,6 +104,25 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "添加附件" not in library_html
     assert "data-bulk-action=\"edit-attachments\"" in library_html
     assert "data-bulk-action=\"read-paper\"" in library_html
+    assert "features_page" in library_html
+    assert "多源检索" in library_html
+    assert "api_config_page" in library_html
+    assert "API 配置" in library_html
+    assert "data-api-config-page" in api_config_html
+    assert "data-api-config-panel" in api_config_html
+    assert "api_config_page" in features_html
+    assert "API 配置" in features_html
+    assert "function setupApiConfigPage" in app_js
+    assert "/api-config" in app_js
+    assert "data-save-api-config" in app_js
+    assert "data-toggle-api-config-secrets" in app_js
+    assert "data-check-api-config" in app_js
+    assert "模型名称" in app_js
+    assert "请求地址" in app_js
+    assert "API Key" in app_js
+    assert "GitHub Token" in app_js
+    assert "HuggingFace Token" in app_js
+    assert "Zenodo Token" in app_js
     assert "data-attachment-editor-modal" in library_html
     assert "data-reader-pdf-picker-modal" in library_html
     assert "data-delete-items-modal" in library_html
@@ -136,6 +161,397 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-import-text-form" in app_js
     assert "/items/import-identifier" in app_js
     assert "/items/import-text" in app_js
+    assert "data-add-item-mode=\"retrieval\"" not in app_js
+    assert "function renderRetrievalPage" in app_js
+    assert "function setupRetrievalPage" in app_js
+    assert "function renderSimpleRetrievalMain" in app_js
+    assert "function delegatedRetrievalSubmitEvent" in app_js
+    assert "currentTarget: form" in app_js
+    assert "submitRetrievalSearch(delegatedEvent)" in app_js
+    assert "SIMPLE_RETRIEVAL_SOURCE_CATEGORIES" in app_js
+    assert "function renderSimpleRetrievalSourceCategory" in app_js
+    assert "论文文献" in app_js
+    assert "数据集 / 软件 / 代码对象" in app_js
+    assert "本地 / 内部系统" in app_js
+    assert "simple-retrieval-guide" in app_js
+    assert "retrieval-advanced" in app_js
+    assert "高级：配置数据源" in app_js
+    assert "function renderRetrievalSourceConfigGuide" in app_js
+    assert "function renderRetrievalSourceConfigHeader" in app_js
+    assert "公共源按资料类型分类" in app_js
+    assert "source-httpjson-config" in app_js
+    assert "url_template：检索接口" in app_js
+    assert "保存配置" in app_js
+    assert "data-retrieval-search-form" in app_js
+    assert "data-retrieval-candidate-check" in app_js
+    assert "data-select-retrieval-candidates" in app_js
+    assert "function setRetrievalCandidateSelection" in app_js
+    assert "data-import-retrieval-selected" in app_js
+    assert "[\"pubmed\", \"PubMed\"]" in app_js
+    assert "[\"biorxiv\", \"bioRxiv\"]" in app_js
+    assert "[\"medrxiv\", \"medRxiv\"]" in app_js
+    assert "[\"semanticscholar\", \"Semantic Scholar\"]" in app_js
+    assert "[\"datacite\", \"DataCite\"]" in app_js
+    assert "[\"github\", \"GitHub\"]" in app_js
+    assert "[\"huggingface\", \"HuggingFace\"]" in app_js
+    assert "[\"zenodo\", \"Zenodo\"]" in app_js
+    assert "[\"openlibrary\", \"OpenLibrary\"]" in app_js
+    assert "[\"ads\", \"NASA ADS\"]" in app_js
+    assert "[\"localfile\", \"Local CSV/JSONL\"]" in app_js
+    assert "[\"httpjson\", \"HTTP JSON\"]" in app_js
+    assert "[\"sqlite\", \"SQLite\"]" in app_js
+    assert "[\"manifest\", \"Object Manifest\"]" in app_js
+    assert "[\"openalex\", \"OpenAlex\"]" in app_js
+    assert "function renderRetrievalSourceOption" in app_js
+    assert "function retrievalSourceSetupText" in app_js
+    assert "function retrievalSourceSetupTitle" in app_js
+    assert "config_mode" in app_js
+    assert "global_rate_limit_env" in app_js
+    assert "function formatRateLimitSeconds" in app_js
+    assert "function renderCandidateAiEvaluation" in app_js
+    assert "retrievalAiEvaluationSummary" in app_js
+    assert "data-simple-ai-query-plan" in app_js
+    assert "按计划批量检索" in app_js
+    assert "simplePlanBatchJobId" in app_js
+    assert "data-simple-plan-batch-status" in app_js
+    assert 'data-select-retrieval-candidates="ai"' in app_js
+    assert "function simplePlanRecommendedSources" in app_js
+    assert "function simplePlanBatchSourceSelection" in app_js
+    assert "retrievalSimpleBatchLimit" in app_js
+    assert "retrievalSimpleSourceLimits" in app_js
+    assert "retrievalBatchMode" in app_js
+    assert "data-simple-batch-mode" in app_js
+    assert "快速模式" in app_js
+    assert "全量模式" in app_js
+    assert "意图：" in app_js
+    assert "data-simple-source-limit" in app_js
+    assert "function simplePlanBatchSourceLimits" in app_js
+    assert "function loadSimplePlanBatchCandidates" in app_js
+    assert "function retrievalCandidateTypeMeta" in app_js
+    assert "function renderRetrievalZoteroPreview" in app_js
+    assert "retrieval-type-pill" in app_js
+    assert "retrieval-zotero-preview" in app_js
+    assert "data-load-simple-batch-candidates" in app_js
+    assert "/candidates?${params.toString()}" in app_js
+    assert "function currentSimpleBatchLimit" in app_js
+    assert "draftRetrievalBatchQueries({ limit: 5 })" in app_js
+    assert "source_limits: sourceLimits" in app_js
+    assert "retrievalRunId" in app_js
+    assert "retrievalRuns" in app_js
+    assert "retrievalSummary" in app_js
+    assert "function renderRetrievalSummary" in app_js
+    assert "function loadRetrievalSummary" in app_js
+    assert "function downloadRetrievalSummaryReport" in app_js
+    assert "retrievalLocalPaths" in app_js
+    assert "retrievalLocalFieldMap" in app_js
+    assert "retrievalLocalPreview" in app_js
+    assert "fieldMapText" in app_js
+    assert "field_map_text" in app_js
+    assert "retrievalHttpJsonConfig" in app_js
+    assert "retrievalHttpJsonTemplates" in app_js
+    assert "retrievalHttpJsonPreview" in app_js
+    assert "retrievalSqliteConfig" in app_js
+    assert "retrievalSqlitePreview" in app_js
+    assert "retrievalManifestConfig" in app_js
+    assert "retrievalManifestPreview" in app_js
+    assert "retrievalBatchJobs" in app_js
+    assert "function renderRetrievalLocalConfig" in app_js
+    assert "function renderRetrievalLocalConfigWithPreview" in app_js
+    assert "function renderRetrievalLocalPreview" in app_js
+    assert "function renderRetrievalHttpJsonConfig" in app_js
+    assert "function renderRetrievalHttpJsonPreview" in app_js
+    assert "function renderRetrievalSqliteConfig" in app_js
+    assert "function renderRetrievalSqlitePreview" in app_js
+    assert "function renderRetrievalManifestConfig" in app_js
+    assert "function renderRetrievalManifestPreview" in app_js
+    assert "retrieval-local-preview-quality" in app_js
+    assert "retrieval-local-preview-issues" in app_js
+    assert "coverage" in app_js
+    assert "recommendations" in app_js
+    assert "function loadRetrievalLocalPreview" in app_js
+    assert "function suggestRetrievalLocalFieldMap" in app_js
+    assert "function suggestedLocalFieldMapFromPreview" in app_js
+    assert "function loadRetrievalHttpJsonConfig" in app_js
+    assert "function loadRetrievalHttpJsonTemplates" in app_js
+    assert "function applyRetrievalHttpJsonTemplate" in app_js
+    assert "function suggestRetrievalHttpJsonFieldMap" in app_js
+    assert "function loadRetrievalHttpJsonPreview" in app_js
+    assert "function saveRetrievalHttpJsonConfig" in app_js
+    assert "await loadRetrievalHttpJsonPreview({ silent: false })" in app_js
+    assert "function clearRetrievalHttpJsonConfig" in app_js
+    assert "function loadRetrievalSqliteConfig" in app_js
+    assert "function loadRetrievalSqliteTemplates" in app_js
+    assert "function applyRetrievalSqliteTemplate" in app_js
+    assert "function suggestRetrievalSqliteFieldMap" in app_js
+    assert "function loadRetrievalSqlitePreview" in app_js
+    assert "function saveRetrievalSqliteConfig" in app_js
+    assert "await loadRetrievalSqlitePreview({ silent: false })" in app_js
+    assert "function clearRetrievalSqliteConfig" in app_js
+    assert "function loadRetrievalManifestConfig" in app_js
+    assert "function loadRetrievalManifestTemplates" in app_js
+    assert "function applyRetrievalManifestTemplate" in app_js
+    assert "function suggestRetrievalManifestFieldMap" in app_js
+    assert "function applyRetrievalFieldMapSuggestionToConfig" in app_js
+    assert "function applyRetrievalReadinessFieldMapSuggestionToConfig" in app_js
+    assert "function loadRetrievalManifestPreview" in app_js
+    assert "function saveRetrievalManifestConfig" in app_js
+    assert "await loadRetrievalManifestPreview({ silent: false })" in app_js
+    assert "function clearRetrievalManifestConfig" in app_js
+    assert "function renderRetrievalBatchPanel" in app_js
+    assert "function formatRetrievalEta" in app_js
+    assert "function submitRetrievalBatch" in app_js
+    assert "function loadRetrievalBatchJobs" in app_js
+    assert "function pauseRetrievalBatch" in app_js
+    assert "function resumeRetrievalBatch" in app_js
+    assert "function cancelRetrievalBatch" in app_js
+    assert "function retryRetrievalBatchFailures" in app_js
+    assert "function downloadRetrievalBatchReport" in app_js
+    assert "function downloadRetrievalQueryPlanReport" in app_js
+    assert "data-report-scope=\"sources\"" in app_js
+    assert "SRC CSV" in app_js
+    assert "function downloadRetrievalSourceSetupReport" in app_js
+    assert "data-pause-retrieval-batch" in app_js
+    assert "data-resume-retrieval-batch" in app_js
+    assert "data-cancel-retrieval-batch" in app_js
+    assert "data-retry-retrieval-batch" in app_js
+    assert "data-download-retrieval-batch-report" in app_js
+    assert "function loadRetrievalLocalPaths" in app_js
+    assert "function saveRetrievalLocalPaths" in app_js
+    assert "data-suggest-retrieval-local-field-map" in app_js
+    assert "retrievalSourceInfo" in app_js
+    assert "retrievalSourcesChecking" in app_js
+    assert "retrievalModelStatus" in app_js
+    assert "function loadRetrievalModelStatus" in app_js
+    assert "function setupRetrievalRehearsalKit" in app_js
+    assert "function validateRetrievalRehearsalRun" in app_js
+    assert "retrievalReadiness" in app_js
+    assert "retrievalReadinessBusy" in app_js
+    assert "function renderRetrievalReadiness" in app_js
+    assert "retrievalOnboarding" in app_js
+    assert "retrievalOnboardingBusy" in app_js
+    assert "function renderRetrievalOnboarding" in app_js
+    assert "function renderRetrievalOnboardingGates" in app_js
+    assert "function renderRetrievalOnboardingSourceEvidence" in app_js
+    assert "function retrievalSourceEvidenceDiagnostic" in app_js
+    assert "function loadRetrievalOnboarding" in app_js
+    assert "retrieval-onboarding-actions" in app_js
+    assert "Batch report" in app_js
+    assert "Source CSV" in app_js
+    assert "source_evidence" in app_js
+    assert "acceptance_gates" in app_js
+    assert "import_readiness" in app_js
+    assert "import ready" in app_js
+    assert "data-retrieval-onboarding-gates" in app_js
+    assert "data-download-retrieval-gate-artifact" in app_js
+    assert "function downloadRetrievalGateArtifact" in app_js
+    assert "retrievalGateArtifactFallbackFilename" in app_js
+    assert "Unsupported onboarding artifact endpoint" in app_js
+    assert "source_gap" in app_js
+    assert "low_sample" in app_js
+    assert "query samples" in app_js
+    assert "source coverage" in app_js
+    assert "config evidence" in app_js
+    assert "batch_config_context_status" in app_js
+    assert "config_context_status" in app_js
+    assert "source_errors" in app_js
+    assert "source errors" in app_js
+    assert "field_map_suggestion" in app_js
+    assert "suggested_field_count" in app_js
+    assert "function loadRetrievalReadiness" in app_js
+    assert "function downloadRetrievalReadinessReport" in app_js
+    assert "function downloadRetrievalTuningReport" in app_js
+    assert "function downloadRetrievalOnboardingReport" in app_js
+    assert "function downloadRetrievalOnboardingPackage" in app_js
+    assert "function downloadRetrievalConfigBundle" in app_js
+    assert "retrievalConfigBundleText" in app_js
+    assert "function renderRetrievalConfigBundleImport" in app_js
+    assert "function dryRunRetrievalConfigBundleImport" in app_js
+    assert "function importRetrievalConfigBundle" in app_js
+    assert "function retrievalConfigBundleResultCsv" in app_js
+    assert "function downloadRetrievalConfigBundleResultCsv" in app_js
+    assert "retrieval-config-bundle-dry-run.csv" in app_js
+    assert "result,source,status,action,reason,configured,dry_run,bundle_schema" in app_js
+    assert "retrievalSourceIntakeInput" in app_js
+    assert "function renderRetrievalSourceIntake" in app_js
+    assert "function analyzeRetrievalSourceIntake" in app_js
+    assert "function downloadRetrievalSourceIntakeReport" in app_js
+    assert "function applyRetrievalSourceIntakeToFieldMapLab" in app_js
+    assert "function applyRetrievalSourceIntakeToConfig" in app_js
+    assert "retrievalFieldMapLabSource" in app_js
+    assert "retrievalFieldMapLabUseAi" in app_js
+    assert "function renderRetrievalFieldMapLab" in app_js
+    assert "function suggestRetrievalFieldMapLab" in app_js
+    assert "function downloadRetrievalFieldMapReport" in app_js
+    assert "function downloadRetrievalConfiguredFieldMapReport" in app_js
+    assert "function applyRetrievalFieldMapLabDraft" in app_js
+    assert "function retrievalFieldMapLabSamples" in app_js
+    assert "/retrieval/sources" in app_js
+    assert "/retrieval/sources/report" in app_js
+    assert "/retrieval/onboarding?" in app_js
+    assert "/retrieval/onboarding/report" in app_js
+    assert "/retrieval/onboarding/package" in app_js
+    assert "/retrieval/config-bundle/download" in app_js
+    assert "/retrieval/config-bundle?dry_run=1" in app_js
+    assert "/retrieval/source-intake" in app_js
+    assert "/retrieval/source-intake/report" in app_js
+    assert "/retrieval/rehearsal/setup" in app_js
+    assert "/retrieval/rehearsal/validate" in app_js
+    assert "validation_summary" in app_js
+    assert "/retrieval/model-status" in app_js
+    assert "/retrieval/field-map/suggest" in app_js
+    assert "/retrieval/field-map/report" in app_js
+    assert "/retrieval/readiness" in app_js
+    assert "/retrieval/readiness/report" in app_js
+    assert "/retrieval/query-plan" in app_js
+    assert "/retrieval/query-plan/report" in app_js
+    assert "/retrieval/tuning/report" in app_js
+    assert "/retrieval/summary" in app_js
+    assert "/retrieval/summary/report" in app_js
+    assert "/retrieval/batches/" in app_js
+    assert "/retrieval/local-files" in app_js
+    assert "/retrieval/local-files/preview" in app_js
+    assert "/retrieval/local-files/field-map/suggest" in app_js
+    assert "/field-map/report" in app_js
+    assert "/retrieval/http-json" in app_js
+    assert "/retrieval/http-json/templates" in app_js
+    assert "/retrieval/http-json/field-map/suggest" in app_js
+    assert "/retrieval/http-json/preview" in app_js
+    assert "/retrieval/sqlite" in app_js
+    assert "/retrieval/sqlite/templates" in app_js
+    assert "/retrieval/sqlite/field-map/suggest" in app_js
+    assert "/retrieval/sqlite/preview" in app_js
+    assert "/retrieval/manifest" in app_js
+    assert "/retrieval/manifest/templates" in app_js
+    assert "/retrieval/manifest/field-map/suggest" in app_js
+    assert "/retrieval/manifest/preview" in app_js
+    assert "data-check-retrieval-sources" in app_js
+    assert "data-setup-retrieval-rehearsal" in app_js
+    assert "data-validate-retrieval-rehearsal" in app_js
+    assert "DEMO KIT" in app_js
+    assert "DEMO RUN" in app_js
+    assert "data-download-retrieval-source-setup" in app_js
+    assert "data-check-retrieval-readiness" in app_js
+    assert "data-draft-retrieval-batch-queries" in app_js
+    assert "function draftRetrievalBatchQueries" in app_js
+    assert "data-download-retrieval-query-plan" in app_js
+    assert "PLAN RPT" in app_js
+    assert "function unavailableRetrievalSources" in app_js
+    assert "function availableRetrievalSources" in app_js
+    assert "function unavailableRetrievalSourceMessage" in app_js
+    assert "所选数据源暂不可用" in app_js
+    assert "data-download-retrieval-field-map-report" in app_js
+    assert "data-download-retrieval-configured-field-map" in app_js
+    assert "data-download-retrieval-readiness" in app_js
+    assert "data-download-retrieval-tuning" in app_js
+    assert "data-check-retrieval-onboarding" in app_js
+    assert "data-download-retrieval-onboarding" in app_js
+    assert "data-download-retrieval-onboarding-package" in app_js
+    assert "ONB ZIP" in app_js
+    assert "PLAN coverage" in app_js
+    assert "data-retrieval-onboarding-source-evidence" in app_js
+    assert "data-download-retrieval-config-bundle" in app_js
+    assert "data-retrieval-config-bundle-import" in app_js
+    assert "data-dry-run-retrieval-config-bundle" in app_js
+    assert "data-import-retrieval-config-bundle" in app_js
+    assert "data-clear-retrieval-config-bundle" in app_js
+    assert "data-download-retrieval-config-bundle-result" in app_js
+    assert "data-retrieval-source-intake" in app_js
+    assert "data-retrieval-source-intake-sample-url" in app_js
+    assert "data-analyze-retrieval-source-intake" in app_js
+    assert "data-download-retrieval-source-intake" in app_js
+    assert "data-apply-retrieval-source-intake" in app_js
+    assert "data-apply-retrieval-source-intake-config" in app_js
+    assert "data-apply-retrieval-source-intake-queries" in app_js
+    assert "function retrievalSourceNameFromIntake" in app_js
+    assert "function retrievalTargetSourceNameFromIntake" in app_js
+    assert "target_source?.name" in app_js
+    assert "function applyRetrievalSourceIntakeQueriesToBatch" in app_js
+    assert "state.retrievalSources = new Set([sourceName])" in app_js
+    assert "only this target source is selected by default" in app_js
+    assert "sample_url" in app_js
+    assert "validation_queries" in app_js
+    assert "validation_plan" in app_js
+    assert "Validation plan /" in app_js
+    assert "minimum queries" in app_js
+    assert "draft coverage" in app_js
+    assert "intakeConfigContextTitle" in app_js
+    assert "next action" in app_js
+    assert "function safeRetrievalEndpoint" in app_js
+    assert "function retrievalRemediationButtonHtml" in app_js
+    assert "function retrievalRemediationPayload" in app_js
+    assert "function runRetrievalBatchRemediation" in app_js
+    assert "data-run-retrieval-remediation" in app_js
+    assert "Unsupported remediation endpoint." in app_js
+    assert "No remediation queries available" in app_js
+    assert "validationPlan.gates" in app_js
+    assert "data-retrieval-field-map-lab" in app_js
+    assert "data-retrieval-field-map-lab-source" in app_js
+    assert "data-retrieval-field-map-lab-ai" in app_js
+    assert "data-retrieval-query-plan-ai" in app_js
+    assert "retrievalQueryPlanUseAi" in app_js
+    assert "AI PLAN" in app_js
+    assert "currentRetrievalBatchQueriesText" in app_js
+    assert "applyRetrievalOnboardingQueryParams" in app_js
+    assert "required_queries" in app_js
+    assert "query source" in app_js
+    assert "query coverage" in app_js
+    assert 'params.set("use_ai", "1")' in app_js
+    assert ".retrieval-inline-toggle" in app_css
+    assert "data-retrieval-model-status" in app_js
+    assert "data-check-retrieval-model-status" in app_js
+    assert "/retrieval/model-status${check ? \"?check=1\" : \"\"}" in app_js
+    assert "use_ai" in app_js
+    assert "data-suggest-retrieval-field-map-lab" in app_js
+    assert "data-apply-retrieval-field-map-lab" in app_js
+    assert "data-retrieval-readiness" in app_js
+    assert "data-apply-retrieval-readiness-field-map" in app_js
+    assert ".retrieval-readiness-head strong.low_sample" in app_css
+    assert ".retrieval-readiness-sources .low_sample" in app_css
+    assert ".retrieval-readiness-sources .blocked" in app_css
+    assert "data-retrieval-local-paths-form" in app_js
+    assert "data-clear-retrieval-local-paths" in app_js
+    assert "data-refresh-retrieval-local-preview" in app_js
+    assert "data-retrieval-http-json-form" in app_js
+    assert "data-apply-retrieval-http-json-template" in app_js
+    assert "data-clear-retrieval-http-json" in app_js
+    assert "data-suggest-retrieval-http-json-field-map" in app_js
+    assert "data-refresh-retrieval-http-json-preview" in app_js
+    assert "data-retrieval-sqlite-form" in app_js
+    assert "data-apply-retrieval-sqlite-template" in app_js
+    assert "data-clear-retrieval-sqlite" in app_js
+    assert "data-suggest-retrieval-sqlite-field-map" in app_js
+    assert "data-refresh-retrieval-sqlite-preview" in app_js
+    assert "data-retrieval-manifest-form" in app_js
+    assert "data-apply-retrieval-manifest-template" in app_js
+    assert "data-clear-retrieval-manifest" in app_js
+    assert "data-suggest-retrieval-manifest-field-map" in app_js
+    assert "data-refresh-retrieval-manifest-preview" in app_js
+    assert "elapsed_ms" in app_js
+    assert "error_kind" in app_js
+    assert "rate_limit_seconds" in app_js
+    assert "rate_limit_wait_ms" in app_js
+    assert "rate_limit_note" in app_js
+    assert "data-download-retrieval-report" in app_js
+    assert "data-download-retrieval-summary" in app_js
+    assert "data-report-format=\"csv\"" in app_js
+    assert "data-report-format=\"json\"" in app_js
+    assert "function downloadRetrievalReport" in app_js
+    assert "rank_reasons" in app_js
+    assert "confidence_label" in app_js
+    assert "duplicate_hint" in app_js
+    assert "existing_matches" in app_js
+    assert "similarity_hint" in app_js
+    assert "weak_similarity_matches" in app_js
+    assert "candidate_ids" in app_js
+    assert "/retrieval/search" in app_js
+    assert "/retrieval/import" in app_js
+    assert "/retrieval/runs" in app_js
+    assert "/retrieval/batches" in app_js
+    assert "data-retrieval-runs" in app_js
+    assert "data-retrieval-batches" in app_js
+    assert "data-retrieval-batch-form" in app_js
+    assert "data-refresh-retrieval-batches" in app_js
+    assert "data-refresh-retrieval-runs" in app_js
     assert "/items/export-citations" in app_js
     assert "data-export-citation-form" in app_js
     assert "data-export-citation-format" in app_js
@@ -145,8 +561,77 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "selectedItemKeys()" in app_js
     assert "data-import-result-status" in app_js
     assert "条目已存在，已定位到已有条目" in app_js
+    assert "function importEvidenceMessage" in app_js
+    assert "summary.import_evidence" in app_js
+    assert "provenance_recorded_count" in app_js
+    assert "run_report_markdown_endpoint" in app_js
+    assert "溯源记录" in app_js
     assert "currentRealCollectionKey" in app_js
     assert ".add-item-card" in app_css
+    assert ".feature-table" in app_css
+    assert ".feature-strip" in app_css
+    assert "data-retrieval-page" in features_html
+    assert "data-retrieval-page-panel" in features_html
+    assert "多源异构数据检索" in features_html
+    assert "Source intake" in features_html
+    assert "ONB ZIP" in features_html
+    assert ".simple-retrieval-guide" in app_css
+    assert ".simple-search-form" in app_css
+    assert ".simple-section-title" in app_css
+    assert ".simple-source-categories" in app_css
+    assert ".simple-source-category" in app_css
+    assert ".simple-source-option" in app_css
+    assert ".simple-result-tools" in app_css
+    assert ".simple-plan-source-limits" in app_css
+    assert ".simple-plan-source-limit-grid" in app_css
+    assert ".retrieval-advanced" in app_css
+    assert ".retrieval-source-config-guide" in app_css
+    assert ".retrieval-public-source-category" in app_css
+    assert ".retrieval-config-source-links" in app_css
+    assert ".retrieval-source-config-status" in app_css
+    assert ".retrieval-advanced-section" in app_css
+    assert ".retrieval-candidates" in app_css
+    assert ".retrieval-candidate" in app_css
+    assert ".retrieval-type-pill" in app_css
+    assert ".retrieval-zotero-preview" in app_css
+    assert ".simple-plan-mode-toggle" in app_css
+    assert ".retrieval-stats" in app_css
+    assert ".retrieval-actions" in app_css
+    assert ".retrieval-local-config" in app_css
+    assert ".retrieval-http-json-config" in app_css
+    assert ".retrieval-http-json-templates" in app_css
+    assert ".retrieval-sqlite-config" in app_css
+    assert ".retrieval-sqlite-templates" in app_css
+    assert ".retrieval-manifest-config" in app_css
+    assert ".retrieval-manifest-templates" in app_css
+    assert ".retrieval-local-preview" in app_css
+    assert ".retrieval-local-preview-mappings" in app_css
+    assert ".retrieval-local-preview-quality" in app_css
+    assert ".retrieval-local-preview-issues" in app_css
+    assert ".retrieval-batch" in app_css
+    assert ".retrieval-batch-actions" in app_css
+    assert ".retrieval-batch-progress" in app_css
+    assert ".retrieval-source-status" in app_css
+    assert ".retrieval-source-setup" in app_css
+    assert ".retrieval-source-message" in app_css
+    assert ".retrieval-readiness" in app_css
+    assert ".retrieval-readiness-grid" in app_css
+    assert ".retrieval-readiness-sources" in app_css
+    assert ".retrieval-config-bundle" in app_css
+    assert ".retrieval-config-bundle-result" in app_css
+    assert ".retrieval-field-map-lab" in app_css
+    assert ".retrieval-field-map-lab-result" in app_css
+    assert ".retrieval-source-row label.warning" in app_css
+    assert ".retrieval-rank-row" in app_css
+    assert ".retrieval-duplicate" in app_css
+    assert ".retrieval-similarity" in app_css
+    assert ".retrieval-report-actions" in app_css
+    assert ".retrieval-report-btn" in app_css
+    assert ".retrieval-summary" in app_css
+    assert ".retrieval-summary-title" in app_css
+    assert ".retrieval-summary-grid" in app_css
+    assert ".retrieval-summary-sources" in app_css
+    assert ".retrieval-history" in app_css
     assert ".export-citation-card" in app_css
     assert ".import-results" in app_css
     assert ".floating-card .form-action-btn" in app_css
@@ -322,9 +807,118 @@ def test_translator_document_records_v1_boundaries() -> None:
     assert "BibTeX" in doc
 
 
+def test_retrieval_deployment_document_records_source_setup() -> None:
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "retrieval-deployment.md").read_text(encoding="utf-8")
+
+    assert "OPENALEX_API_KEY" in doc
+    assert "ADS_API_TOKEN" in doc
+    assert "WEB_LIBRARY_RETRIEVAL_HTTP_JSON_CONFIG" in doc
+    assert "WEB_LIBRARY_RETRIEVAL_SQLITE_CONFIG" in doc
+    assert "WEB_LIBRARY_RETRIEVAL_MANIFEST_CONFIG" in doc
+    assert "WEB_LIBRARY_RETRIEVAL_RATE_LIMIT_SECONDS" in doc
+    assert "/retrieval/sources/report" in doc
+    assert "/retrieval/readiness/report" in doc
+    assert "/retrieval/tuning/report" in doc
+    assert "/retrieval/onboarding/report" in doc
+    assert "/retrieval/batches/<job_id>/report" in doc
+    assert "batch_validation" in doc
+    assert "import_readiness" in doc
+    assert "/retrieval/config-bundle/download" in doc
+    assert "/retrieval/model-status" in doc
+    assert "/retrieval/field-map/suggest" in doc
+    assert "/retrieval/field-map/report" in doc
+    assert "/retrieval/sqlite/field-map/report" in doc
+    assert "source_setup" in doc
+    assert "field_map_reports" in doc
+    assert "/retrieval/source-intake" in doc
+    assert "/retrieval/source-intake/report" in doc
+    assert "Source intake" in doc
+    assert "sample_url=true" in doc
+    assert "target_source" in doc
+    assert "validation_plan" in doc
+    assert "validation_queries" in doc
+    assert "Use queries" in doc
+    assert "目标源仍不可用" in doc
+    assert "普通检索和批量检索" in doc
+    assert "/retrieval/rehearsal/setup" in doc
+    assert "/retrieval/rehearsal/validate" in doc
+    assert "DEMO RUN" in doc
+    assert "AI_PIXEL_BASE_URL" in doc
+    assert "AI_PIXEL_API_KEY" in doc
+    assert "use_ai=true" in doc
+    assert "READY" in doc
+    assert "Object Manifest" in doc
+    assert "RAG" in doc
+
+
 def test_static_javascript_uses_browser_executable_mimetype() -> None:
     client = create_app().test_client()
     for path in ["/static/reader.js", "/static/vendor/pdfjs/pdf.min.js"]:
         response = client.get(path)
         assert response.status_code == 200
         assert response.headers["Content-Type"].startswith("application/javascript")
+        assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_features_index_page_points_to_library_selection() -> None:
+    client = create_app().test_client()
+
+    response = client.get("/features")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "多源异构数据检索" in html
+    assert "选择文库" in html
+    assert "href=\"/\"" in html
+
+
+def test_library_features_page_mounts_retrieval_workspace(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.get(f"/library/{library['library_id']}/features")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "多源异构数据检索" in html
+    assert "data-retrieval-page" in html
+    assert "data-retrieval-page-panel" in html
+    assert "当前文库" in html
+    assert "返回文库" in html
+
+
+def test_library_api_config_page_mounts_config_workspace(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.get(f"/library/{library['library_id']}/api-config")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "API 配置" in html
+    assert "data-api-config-page" in html
+    assert "data-api-config-panel" in html
+    assert "多源检索" in html
+
+
+def test_ai_retrieval_review_guide_documents_review_flow() -> None:
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "docs" / "ai-assisted-retrieval-review-guide.md").read_text(encoding="utf-8")
+
+    assert "AI 辅助多源异构检索闭环" in guide
+    assert "直接检索和计划检索的区别" in guide
+    assert "快速模式" in guide
+    assert "全量模式" in guide
+    assert "Zotero 字段预览" in guide
+    assert "screenshots/api-config.png" in guide
+    assert "screenshots/multi-source-retrieval.png" in guide
+    assert "screenshots/retrieval-candidates.png" in guide
+    assert "建议 PR 描述" in guide
+    assert "node --check src/zotero_web_library/static/app.js" in guide
