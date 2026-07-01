@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import io
 import json
@@ -10,6 +11,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import uuid
 import zipfile
 from collections import Counter
 from difflib import SequenceMatcher
@@ -87,13 +89,26 @@ from .zotero_adapter import ZoteroRepository
 
 RETRIEVAL_BATCH_LOCK = threading.Lock()
 RUNNING_RETRIEVAL_BATCHES: set[str] = set()
+RETRIEVAL_BACKGROUND_LOCK = threading.Lock()
+RUNNING_RETRIEVAL_QUERY_PLAN_JOBS: set[str] = set()
+RUNNING_RETRIEVAL_AI_SCORING_JOBS: set[str] = set()
+RUNNING_RETRIEVAL_SEARCH_JOBS: set[str] = set()
+RETRIEVAL_QUERY_PLAN_JOBS: dict[str, dict[str, Any]] = {}
+RETRIEVAL_AI_SCORING_JOBS: dict[str, dict[str, Any]] = {}
+RETRIEVAL_SEARCH_JOBS: dict[str, dict[str, Any]] = {}
+RETRIEVAL_BACKGROUND_JOB_HISTORY_LIMIT = 30
 RETRIEVAL_CONFIG_BUNDLE_SCHEMA = "web-library.retrieval-config-bundle/v1"
 RETRIEVAL_BATCH_CONTEXT_SCHEMA = "web-library.retrieval-batch-context/v1"
 RETRIEVAL_CONFIG_BUNDLE_REDACTED_VALUE = "__REDACTED__"
 API_CONFIG_PREFERENCE_KEY = "api_config"
 API_CONFIG_SECRET_KEEP_VALUE = "__KEEP_SECRET__"
 RETRIEVAL_BATCH_VALIDATION_MIN_COMPLETED_QUERIES = 3
-AI_CANDIDATE_EVALUATION_BATCH_SIZE = 20
+AI_CANDIDATE_EVALUATION_BATCH_SIZE = 5
+AI_CANDIDATE_EVALUATION_TIMEOUT_SECONDS = 90
+AI_CANDIDATE_MANUAL_EVALUATION_LIMIT = 10
+AI_CANDIDATE_METADATA_ABSTRACT_LIMIT = 600
+AI_CANDIDATE_SCORE_FRAMEWORK = "ai_rubric_v1"
+DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK = "metadata_rules_v1"
 SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(authorization|api[-_ ]?key|token|secret|password|credential|bearer)",
     re.I,
@@ -5236,7 +5251,9 @@ def candidate_metadata_for_ai(candidate: dict[str, Any], index: int) -> dict[str
         "title": candidate_field(candidate, "title"),
         "authors": candidate_author_names(candidate),
         "year": str(candidate.get("year") or "").strip(),
-        "abstract": str(candidate.get("abstract") or candidate_field(candidate, "abstractNote") or "").strip()[:1200],
+        "abstract": str(candidate.get("abstract") or candidate_field(candidate, "abstractNote") or "").strip()[
+            :AI_CANDIDATE_METADATA_ABSTRACT_LIMIT
+        ],
         "source": str(candidate.get("source") or "").strip(),
         "sources": [str(source) for source in sources[:8] if str(source or "").strip()],
         "source_count": safe_int(candidate.get("source_count")) or len(sources) or 1,
@@ -5255,16 +5272,37 @@ def retrieval_candidate_ai_messages(query: str, metadata: list[dict[str, Any]]) 
         {
             "role": "system",
             "content": (
-                "You evaluate retrieval candidates for a Zotero-style library. "
-                "Use only the provided metadata. Return strict JSON with an evaluations array. "
-                "Each evaluation must include candidate_id, decision (recommend|review|reject), "
-                "relevance_score 0-1, quality_score 0-1, risk_level (low|medium|high), "
-                "reason, and missing_fields. Do not invent identifiers."
+                "你是 Zotero 风格科研文库的检索候选评审助手。"
+                "只能依据提供的元数据判断，不得编造标识符、作者、摘要、来源或结论。"
+                "必须只返回严格 JSON，顶层包含 evaluations 数组，不能输出额外文字。"
+                "每个 evaluation 必须包含 candidate_id、decision（recommend|review|reject）、"
+                "topic_relevance_score、metadata_quality_score、source_evidence_score、import_risk_score、"
+                "final_confidence_score、risk_level（low|medium|high）、reason、missing_fields。"
+                "所有分数为 0 到 100 的整数。评分准则："
+                "topic_relevance_score 衡量 query 与标题/摘要/资料类型的语义匹配；"
+                "metadata_quality_score 衡量标题、作者、年份、摘要、标识符、URL 是否足够支撑 Zotero 入库；"
+                "source_evidence_score 衡量 DOI/PMID/arXiv/ISBN/URL、来源名称、多源命中的可追溯性和证据强度；"
+                "import_risk_score 衡量重复、噪声、缺字段、来源不确定性等入库风险，分数越高风险越大；"
+                "final_confidence_score 是综合推荐置信度，不要求按固定公式计算。"
+                "统一使用这个尺度：90-100 非常强；75-89 较强；55-74 需要复核；30-54 较弱；0-29 无关或不安全。"
+                "如果缺标题，或标识符和 URL 都缺失，final_confidence_score 不应超过 60。"
+                "如果标题/摘要明显偏离主题，即使元数据完整也要降低 final_confidence_score。"
+                "证据不足或不确定性明显时优先给 review。"
+                "reason 必须使用简洁中文，说明为什么推荐、复核或不建议，不超过 80 个汉字。"
             ),
         },
         {
             "role": "user",
-            "content": json.dumps({"query": query, "metadata_only": True, "candidates": metadata}, ensure_ascii=False),
+            "content": json.dumps(
+                {
+                    "query": query,
+                    "metadata_only": True,
+                    "score_framework": AI_CANDIDATE_SCORE_FRAMEWORK,
+                    "score_scale": "0-100; higher is better except import_risk_score",
+                    "candidates": metadata,
+                },
+                ensure_ascii=False,
+            ),
         },
     ]
 
@@ -5282,6 +5320,16 @@ def clamp_score(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, number)), 3)
 
 
+def clamp_percent_score(value: Any, default: float = 0.0) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if 0 <= number <= 1:
+        number *= 100
+    return int(round(max(0.0, min(100.0, number))))
+
+
 def candidate_missing_fields(candidate: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     identifiers = candidate.get("identifiers") if isinstance(candidate.get("identifiers"), dict) else {}
@@ -5297,15 +5345,34 @@ def candidate_missing_fields(candidate: dict[str, Any]) -> list[str]:
     return missing
 
 
-def strict_ai_auto_select(decision: str, relevance: float, quality: float, risk: str, missing_fields: list[str]) -> bool:
+def strict_ai_auto_select(
+    decision: str,
+    final_confidence: int,
+    import_risk: int,
+    risk: str,
+    missing_fields: list[str],
+) -> bool:
     critical_missing = {"title", "identifier_or_url"}
     return (
         decision == "recommend"
-        and relevance >= 0.78
-        and quality >= 0.68
+        and final_confidence >= 75
+        and import_risk <= 40
         and risk != "high"
         and not (critical_missing & set(missing_fields or []))
     )
+
+
+def deterministic_source_evidence_score(candidate: dict[str, Any], identifiers: dict[str, Any]) -> int:
+    score = 25
+    if any(identifiers.get(key) for key in ("doi", "pmid", "arxiv", "isbn")):
+        score += 35
+    if candidate.get("landing_url") or candidate_field(candidate, "url"):
+        score += 20
+    if candidate.get("multi_source"):
+        score += 20
+    elif candidate.get("source") or candidate.get("sources"):
+        score += 10
+    return clamp_percent_score(score)
 
 
 def deterministic_candidate_evaluation(candidate: dict[str, Any], query: str, *, status: str, reason: str = "") -> dict[str, Any]:
@@ -5348,13 +5415,25 @@ def deterministic_candidate_evaluation(candidate: dict[str, Any], query: str, *,
         decision = "reject"
     elif relevance >= 0.76 and quality >= 0.68 and risk != "high":
         decision = "recommend"
+    topic_score = clamp_percent_score(relevance)
+    metadata_score = clamp_percent_score(quality)
+    source_score = deterministic_source_evidence_score(candidate, identifiers)
+    import_risk_score = 72 if risk == "high" else (42 if risk == "medium" else 18)
+    final_confidence = clamp_percent_score((topic_score + metadata_score + source_score + (100 - import_risk_score)) / 4)
     return {
         "status": status,
+        "score_source": "deterministic_rules",
+        "score_framework": DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK,
         "decision": decision,
+        "topic_relevance_score": topic_score,
+        "metadata_quality_score": metadata_score,
+        "source_evidence_score": source_score,
+        "import_risk_score": import_risk_score,
+        "final_confidence_score": final_confidence,
         "relevance_score": relevance,
         "quality_score": quality,
         "risk_level": risk,
-        "reason": reason or ("Metadata is sufficient for a first-pass recommendation." if decision == "recommend" else "Needs human review based on available metadata."),
+        "reason": reason or ("元数据完整且与检索主题较匹配，可作为初步推荐。" if decision == "recommend" else "当前元数据仍需人工复核后再入库。"),
         "missing_fields": missing,
         "auto_select": False,
     }
@@ -5364,8 +5443,11 @@ def normalized_ai_evaluation(raw: dict[str, Any], candidate: dict[str, Any]) -> 
     decision = str(raw.get("decision") or "").strip().lower()
     if decision not in {"recommend", "review", "reject"}:
         decision = "review"
-    relevance = clamp_score(raw.get("relevance_score"), 0.0)
-    quality = clamp_score(raw.get("quality_score"), 0.0)
+    topic_relevance = clamp_percent_score(raw.get("topic_relevance_score", raw.get("relevance_score")), 0.0)
+    metadata_quality = clamp_percent_score(raw.get("metadata_quality_score", raw.get("quality_score")), 0.0)
+    source_evidence = clamp_percent_score(raw.get("source_evidence_score"), 0.0)
+    import_risk = clamp_percent_score(raw.get("import_risk_score"), 50.0)
+    final_confidence = clamp_percent_score(raw.get("final_confidence_score"), topic_relevance)
     risk = str(raw.get("risk_level") or "").strip().lower()
     if risk not in {"low", "medium", "high"}:
         risk = "medium"
@@ -5373,17 +5455,36 @@ def normalized_ai_evaluation(raw: dict[str, Any], candidate: dict[str, Any]) -> 
     missing_fields = [str(field).strip() for field in missing if str(field or "").strip()][:8]
     return {
         "status": "evaluated",
+        "score_source": "ai_model",
+        "score_framework": AI_CANDIDATE_SCORE_FRAMEWORK,
         "decision": decision,
-        "relevance_score": relevance,
-        "quality_score": quality,
+        "topic_relevance_score": topic_relevance,
+        "metadata_quality_score": metadata_quality,
+        "source_evidence_score": source_evidence,
+        "import_risk_score": import_risk,
+        "final_confidence_score": final_confidence,
+        "relevance_score": round(topic_relevance / 100, 3),
+        "quality_score": round(metadata_quality / 100, 3),
         "risk_level": risk,
-        "reason": str(raw.get("reason") or "").strip()[:360] or "AI evaluated the candidate metadata.",
+        "reason": str(raw.get("reason") or "").strip()[:360] or "AI 已根据候选元数据完成评分。",
         "missing_fields": missing_fields,
-        "auto_select": strict_ai_auto_select(decision, relevance, quality, risk, missing_fields),
+        "auto_select": strict_ai_auto_select(decision, final_confidence, import_risk, risk, missing_fields),
     }
 
 
-def apply_ai_evaluations_to_candidates(candidates: list[dict[str, Any]], raw_evaluations: Any, id_map: dict[str, dict[str, Any]]) -> dict[str, int]:
+def ai_evaluation_error_message(exc: Exception) -> str:
+    message = str(exc or exc.__class__.__name__).strip()
+    return message[:240] or exc.__class__.__name__
+
+
+def apply_ai_evaluations_to_candidates(
+    candidates: list[dict[str, Any]],
+    raw_evaluations: Any,
+    id_map: dict[str, dict[str, Any]],
+    *,
+    fallback_candidates: list[dict[str, Any]] | None = None,
+    fallback_reason: str = "AI 未返回该候选的有效评分，已使用规则兜底。",
+) -> dict[str, int]:
     evaluations = raw_evaluations if isinstance(raw_evaluations, list) else []
     accepted = 0
     rejected = 0
@@ -5398,10 +5499,11 @@ def apply_ai_evaluations_to_candidates(candidates: list[dict[str, Any]], raw_eva
             continue
         candidate["ai_evaluation"] = normalized_ai_evaluation(raw, candidate)
         accepted += 1
-    for candidate in candidates:
+    targets = fallback_candidates if fallback_candidates is not None else candidates
+    for candidate in targets:
         if isinstance(candidate.get("ai_evaluation"), dict):
             continue
-        candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, "", status="fallback", reason="AI did not return a valid evaluation for this candidate.")
+        candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, "", status="fallback", reason=fallback_reason)
     return {"accepted": accepted, "rejected": rejected}
 
 
@@ -5423,8 +5525,9 @@ def sort_candidates_by_ai_evaluation(candidates: list[dict[str, Any]]) -> list[d
         return (
             0 if evaluation.get("auto_select") else 1,
             decision_weight.get(str(evaluation.get("decision") or "review"), 1),
-            -float(evaluation.get("relevance_score") or 0),
-            -float(evaluation.get("quality_score") or 0),
+            -float(evaluation.get("final_confidence_score") or 0),
+            -float(evaluation.get("topic_relevance_score") or 0),
+            -float(evaluation.get("metadata_quality_score") or 0),
             int(candidate.get("rank") or 9999),
         )
 
@@ -5432,6 +5535,118 @@ def sort_candidates_by_ai_evaluation(candidates: list[dict[str, Any]]) -> list[d
     for index, candidate in enumerate(ordered, start=1):
         candidate["rank"] = index
     return ordered
+
+
+def retrieval_background_job_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def retrieval_background_inline_enabled(name: str) -> bool:
+    names = {
+        "WEB_LIBRARY_RETRIEVAL_BACKGROUND_INLINE",
+        f"WEB_LIBRARY_RETRIEVAL_{name.upper()}_INLINE",
+    }
+    return any(os.environ.get(env_name, "").strip().lower() in {"1", "true", "yes"} for env_name in names)
+
+
+def retrieval_job_snapshot(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    return copy.deepcopy(job) if isinstance(job, dict) else None
+
+
+def latest_retrieval_background_job(store: dict[str, dict[str, Any]], library_id: str) -> dict[str, Any] | None:
+    jobs = [job for job in store.values() if job.get("library_id") == library_id]
+    jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    return jobs[0] if jobs else None
+
+
+def trim_retrieval_background_jobs(store: dict[str, dict[str, Any]], library_id: str) -> None:
+    jobs = [job for job in store.values() if job.get("library_id") == library_id]
+    jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    for job in jobs[RETRIEVAL_BACKGROUND_JOB_HISTORY_LIMIT:]:
+        status = str(job.get("status") or "")
+        if status not in {"queued", "running", "canceling"}:
+            store.pop(str(job.get("job_id") or ""), None)
+
+
+def retrieval_candidate_rule_confidence_value(candidate: dict[str, Any]) -> float:
+    def normalized(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number <= 0:
+            return None
+        return number / 100 if number > 1 else number
+
+    confidence = normalized(candidate.get("confidence"))
+    if confidence is not None:
+        return confidence
+    evaluation = candidate.get("ai_evaluation") if isinstance(candidate.get("ai_evaluation"), dict) else {}
+    final_confidence = normalized(evaluation.get("final_confidence_score"))
+    if final_confidence is not None:
+        return final_confidence
+    sources = candidate.get("sources") if isinstance(candidate.get("sources"), list) else []
+    source_count = safe_int(candidate.get("source_count")) or len(sources)
+    return min(0.95, 0.45 + source_count * 0.08)
+
+
+def retrieval_candidate_job_key(candidate: dict[str, Any], index: int) -> str:
+    for key in (candidate.get("client_key"), candidate.get("candidate_id"), candidate.get("external_id")):
+        clean = str(key or "").strip()
+        if clean:
+            return clean
+    title = candidate_field(candidate, "title") or candidate.get("title") or "candidate"
+    return f"ai-job-{index}-{hashlib.sha1(str(title).encode('utf-8')).hexdigest()[:10]}"
+
+
+def retrieval_candidate_has_ai_model_evaluation(candidate: dict[str, Any]) -> bool:
+    evaluation = candidate.get("ai_evaluation") if isinstance(candidate.get("ai_evaluation"), dict) else {}
+    return evaluation.get("score_source") == "ai_model" or evaluation.get("status") == "evaluated"
+
+
+def retrieval_ai_scoring_job_summary(job: dict[str, Any]) -> dict[str, Any]:
+    candidates = job.get("candidates") if isinstance(job.get("candidates"), list) else []
+    model = job.get("model_status") if isinstance(job.get("model_status"), dict) else {}
+    ai_evaluated = [candidate for candidate in candidates if retrieval_candidate_has_ai_model_evaluation(candidate)]
+    processed = safe_int(job.get("completed_count"))
+    failed = safe_int(job.get("failed_count"))
+    total = safe_int(job.get("total_count")) or len(candidates)
+    status = str(job.get("status") or "queued")
+    if status in {"queued", "running", "canceling"}:
+        summary_status = "evaluating"
+    elif status == "completed" and len(ai_evaluated) >= total and failed == 0:
+        summary_status = "evaluated"
+    elif status in {"canceled", "partial", "completed"} and ai_evaluated:
+        summary_status = "partial"
+    elif status == "failed":
+        summary_status = "error"
+    else:
+        summary_status = status or "skipped"
+    score_source = "deterministic_rules"
+    score_framework = DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK
+    if ai_evaluated and len(ai_evaluated) >= total and failed == 0 and status == "completed":
+        score_source = "ai_model"
+        score_framework = AI_CANDIDATE_SCORE_FRAMEWORK
+    elif ai_evaluated:
+        score_source = "mixed_ai_rules"
+        score_framework = AI_CANDIDATE_SCORE_FRAMEWORK
+    return {
+        "requested": True,
+        "configured": bool(model.get("configured")),
+        "provider": model.get("provider"),
+        "model": model.get("model"),
+        "score_source": score_source,
+        "score_framework": score_framework,
+        "status": summary_status,
+        "candidate_count": total,
+        "ai_evaluated_candidate_count": len(ai_evaluated),
+        "skipped_candidate_count": max(0, total - len(ai_evaluated)),
+        "failed_batch_count": failed,
+        "processed_candidate_count": processed,
+        "auto_selected_count": sum(1 for candidate in candidates if candidate.get("ai_evaluation", {}).get("auto_select")),
+        "decision_counts": ai_evaluation_decision_counts(ai_evaluated),
+        "error": str(job.get("error") or ""),
+    }
 
 
 def evaluate_retrieval_candidates_with_ai(
@@ -5449,6 +5664,8 @@ def evaluate_retrieval_candidates_with_ai(
             "configured": bool(model.get("configured")),
             "provider": model.get("provider"),
             "model": model.get("model"),
+            "score_source": "ai_model" if model.get("configured") else "deterministic_rules",
+            "score_framework": AI_CANDIDATE_SCORE_FRAMEWORK if model.get("configured") else DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK,
             "status": "skipped",
             "candidate_count": len(candidates),
             "auto_selected_count": 0,
@@ -5459,38 +5676,96 @@ def evaluate_retrieval_candidates_with_ai(
             return summary
         if not use_ai_evaluation:
             for candidate in candidates:
-                candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, query, status="skipped", reason="AI evaluation was disabled.")
+                candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, query, status="skipped", reason="当前检索默认使用规则评分。")
+            summary["score_source"] = "deterministic_rules"
+            summary["score_framework"] = DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK
             summary["decision_counts"] = ai_evaluation_decision_counts(candidates)
             return summary
         if not model.get("configured"):
             for candidate in candidates:
-                candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, query, status="not_configured", reason="Model API is not configured.")
+                candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, query, status="not_configured", reason="模型 API 未配置，已使用规则评分。")
             summary["status"] = "not_configured"
+            summary["score_source"] = "deterministic_rules"
+            summary["score_framework"] = DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK
             summary["decision_counts"] = ai_evaluation_decision_counts(candidates)
             return summary
 
         metadata = [candidate_metadata_for_ai(candidate, index) for index, candidate in enumerate(candidates, start=1)]
         id_map = {item["candidate_id"]: candidate for item, candidate in zip(metadata, candidates, strict=False)}
-        try:
-            accepted_total = 0
-            rejected_total = 0
-            chunks = chunked_ai_candidate_metadata(metadata)
-            for chunk in chunks:
+        accepted_total = 0
+        rejected_total = 0
+        failed_errors: list[str] = []
+        chunks = chunked_ai_candidate_metadata(metadata)
+        for chunk in chunks:
+            chunk_candidates = [id_map[item["candidate_id"]] for item in chunk if item.get("candidate_id") in id_map]
+            try:
                 messages = retrieval_candidate_ai_messages(query, chunk)
-                model_response = ai_pixel_chat_json(messages, post_json=ai_post_json) if callable(ai_post_json) else ai_pixel_chat_json(messages)
+                model_response = (
+                    ai_pixel_chat_json(
+                        messages,
+                        post_json=ai_post_json,
+                        max_tokens=1800,
+                        timeout_seconds=AI_CANDIDATE_EVALUATION_TIMEOUT_SECONDS,
+                    )
+                    if callable(ai_post_json)
+                    else ai_pixel_chat_json(
+                        messages,
+                        max_tokens=1800,
+                        timeout_seconds=AI_CANDIDATE_EVALUATION_TIMEOUT_SECONDS,
+                    )
+                )
                 raw_evaluations = model_response.get("evaluations") or model_response.get("candidates") or []
-                applied = apply_ai_evaluations_to_candidates(candidates, raw_evaluations, id_map)
+                applied = apply_ai_evaluations_to_candidates(
+                    candidates,
+                    raw_evaluations,
+                    id_map,
+                    fallback_candidates=chunk_candidates,
+                )
                 accepted_total += applied["accepted"]
                 rejected_total += applied["rejected"]
-            summary["status"] = "evaluated"
-            summary["evaluation_batch_count"] = len(chunks)
-            summary["accepted_evaluation_count"] = accepted_total
-            summary["rejected_evaluation_count"] = rejected_total
-        except Exception as exc:  # noqa: BLE001 - search must still return usable candidates.
+            except Exception as exc:  # noqa: BLE001 - one slow/invalid batch should not discard prior AI scores.
+                message = ai_evaluation_error_message(exc)
+                failed_errors.append(message)
+                for candidate in chunk_candidates:
+                    if isinstance(candidate.get("ai_evaluation"), dict):
+                        continue
+                    candidate["ai_evaluation"] = deterministic_candidate_evaluation(
+                        candidate,
+                        query,
+                        status="fallback",
+                        reason=f"该候选所在批次 AI 评分失败：{message}",
+                    )
+        summary["evaluation_batch_count"] = len(chunks)
+        summary["accepted_evaluation_count"] = accepted_total
+        summary["rejected_evaluation_count"] = rejected_total
+        summary["failed_batch_count"] = len(failed_errors)
+        if failed_errors and accepted_total:
+            summary["status"] = "partial"
+            summary["score_source"] = "mixed_ai_rules"
+            summary["score_framework"] = AI_CANDIDATE_SCORE_FRAMEWORK
+            summary["error"] = "; ".join(dict.fromkeys(failed_errors[:3]))
+        elif failed_errors:
             summary["status"] = "error"
-            summary["error"] = str(exc or exc.__class__.__name__)
+            summary["error"] = "; ".join(dict.fromkeys(failed_errors[:3]))
+            summary["score_source"] = "deterministic_rules"
+            summary["score_framework"] = DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK
+        elif accepted_total:
+            summary["status"] = "evaluated"
+            summary["score_source"] = "ai_model"
+            summary["score_framework"] = AI_CANDIDATE_SCORE_FRAMEWORK
+        else:
+            summary["status"] = "error"
+            summary["error"] = "AI 未返回有效候选评分。"
+            summary["score_source"] = "deterministic_rules"
+            summary["score_framework"] = DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK
             for candidate in candidates:
-                candidate["ai_evaluation"] = deterministic_candidate_evaluation(candidate, query, status="fallback", reason="AI evaluation failed; using deterministic metadata checks.")
+                if not isinstance(candidate.get("ai_evaluation"), dict):
+                    candidate["ai_evaluation"] = deterministic_candidate_evaluation(
+                        candidate,
+                        query,
+                        status="fallback",
+                        reason="AI 评分失败，已使用规则元数据检查。",
+                    )
         candidates[:] = sort_candidates_by_ai_evaluation(candidates)
         summary["decision_counts"] = ai_evaluation_decision_counts(candidates)
         summary["auto_selected_count"] = sum(1 for candidate in candidates if candidate.get("ai_evaluation", {}).get("auto_select"))
@@ -8052,6 +8327,260 @@ def create_app() -> Flask:
         thread = threading.Thread(target=execute_retrieval_batch_job, args=(library_id, job_id), daemon=True)
         thread.start()
 
+    def execute_retrieval_search_job(library_id: str, job_id: str) -> None:
+        try:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_SEARCH_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+                    return
+                job["status"] = "running"
+                job["started_at"] = now_iso()
+                job["updated_at"] = job["started_at"]
+                job_payload = retrieval_job_snapshot(job) or {}
+            result = run_retrieval_search_for_library(
+                library_id,
+                str(job_payload.get("query") or ""),
+                job_payload.get("sources") or None,
+                safe_int(job_payload.get("limit")) or 10,
+                include_raw=bool(job_payload.get("include_raw")),
+                use_ai_evaluation=bool(job_payload.get("use_ai_evaluation")),
+            )
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_SEARCH_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["message"] = "快速检索已取消。"
+                else:
+                    job["status"] = "completed"
+                    job["result"] = result
+                    job["run_id"] = result.get("run_id", "")
+                    job["candidate_count"] = len(result.get("candidates") or [])
+                    job["message"] = f"检索到 {job['candidate_count']} 条候选。"
+                job["finished_at"] = now_iso()
+                job["updated_at"] = job["finished_at"]
+        except Exception as exc:  # noqa: BLE001 - surface background failures to polling UI
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_SEARCH_JOBS.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = str(exc)
+                    job["message"] = "快速检索失败。"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+        finally:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RUNNING_RETRIEVAL_SEARCH_JOBS.discard(job_id)
+
+    def start_retrieval_search_worker(library_id: str, job_id: str) -> None:
+        with RETRIEVAL_BACKGROUND_LOCK:
+            if job_id in RUNNING_RETRIEVAL_SEARCH_JOBS:
+                return
+            RUNNING_RETRIEVAL_SEARCH_JOBS.add(job_id)
+        if retrieval_background_inline_enabled("search"):
+            execute_retrieval_search_job(library_id, job_id)
+            return
+        thread = threading.Thread(target=execute_retrieval_search_job, args=(library_id, job_id), daemon=True)
+        thread.start()
+
+    def execute_retrieval_query_plan_job(library_id: str, job_id: str) -> None:
+        try:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_QUERY_PLAN_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+                    return
+                job["status"] = "running"
+                job["started_at"] = now_iso()
+                job["updated_at"] = job["started_at"]
+                job_payload = retrieval_job_snapshot(job) or {}
+            plan = retrieval_query_plan_for_library(
+                library_id,
+                seed_query=str(job_payload.get("seed_query") or "robot"),
+                sample_size=safe_int(job_payload.get("sample_size")) or 5,
+                limit=safe_int(job_payload.get("limit")) or 5,
+                use_ai=bool(job_payload.get("use_ai")),
+                selected_sources=job_payload.get("selected_sources") or [],
+            )
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_QUERY_PLAN_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["message"] = "AI 检索计划已取消。"
+                else:
+                    job["status"] = "completed"
+                    job["plan"] = plan
+                    job["message"] = str(plan.get("message") or "AI 检索计划已生成。")
+                    job["query_count"] = safe_int(plan.get("query_count"))
+                job["finished_at"] = now_iso()
+                job["updated_at"] = job["finished_at"]
+        except Exception as exc:  # noqa: BLE001 - surface background failures to polling UI
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_QUERY_PLAN_JOBS.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = str(exc)
+                    job["message"] = "AI 检索计划生成失败。"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+        finally:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RUNNING_RETRIEVAL_QUERY_PLAN_JOBS.discard(job_id)
+
+    def start_retrieval_query_plan_worker(library_id: str, job_id: str) -> None:
+        with RETRIEVAL_BACKGROUND_LOCK:
+            if job_id in RUNNING_RETRIEVAL_QUERY_PLAN_JOBS:
+                return
+            RUNNING_RETRIEVAL_QUERY_PLAN_JOBS.add(job_id)
+        if retrieval_background_inline_enabled("query_plan"):
+            execute_retrieval_query_plan_job(library_id, job_id)
+            return
+        thread = threading.Thread(target=execute_retrieval_query_plan_job, args=(library_id, job_id), daemon=True)
+        thread.start()
+
+    def execute_retrieval_ai_scoring_job(library_id: str, job_id: str) -> None:
+        try:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+                    job["summary"] = retrieval_ai_scoring_job_summary(job)
+                    return
+                job["status"] = "running"
+                job["started_at"] = now_iso()
+                job["updated_at"] = job["started_at"]
+                queue_keys = [str(key) for key in job.get("queue_keys") or []]
+                query = str(job.get("query") or "")
+                job["summary"] = retrieval_ai_scoring_job_summary(job)
+            for client_key in queue_keys:
+                with RETRIEVAL_BACKGROUND_LOCK:
+                    job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                    if not job:
+                        return
+                    if job.get("stop_requested"):
+                        job["status"] = "canceled"
+                        job["message"] = "AI 推荐排序已停止。"
+                        job["finished_at"] = now_iso()
+                        job["updated_at"] = job["finished_at"]
+                        job["summary"] = retrieval_ai_scoring_job_summary(job)
+                        return
+                    candidates = job.get("candidates") if isinstance(job.get("candidates"), list) else []
+                    index = next((idx for idx, item in enumerate(candidates) if str(item.get("client_key") or "") == client_key), -1)
+                    if index < 0:
+                        continue
+                    original = copy.deepcopy(candidates[index])
+                    title = candidate_field(original, "title") or str(original.get("title") or "未命名候选")
+                    candidates[index] = {
+                        **original,
+                        "ai_evaluation": {
+                            "status": "evaluating",
+                            "score_source": "pending_ai",
+                            "score_framework": AI_CANDIDATE_SCORE_FRAMEWORK,
+                            "reason": "AI 正在评分...",
+                            "auto_select": False,
+                        },
+                    }
+                    job["current_candidate_key"] = client_key
+                    job["current_candidate_title"] = title
+                    job["message"] = f"AI 正在评分：{title}"
+                    job["updated_at"] = now_iso()
+                    job["summary"] = retrieval_ai_scoring_job_summary(job)
+                updated = copy.deepcopy(original)
+                candidate_summary: dict[str, Any] = {}
+                try:
+                    evaluated_candidates = [updated]
+                    candidate_summary = evaluate_retrieval_candidates_with_ai(
+                        library_id,
+                        query,
+                        evaluated_candidates,
+                        use_ai_evaluation=True,
+                    )
+                    updated = evaluated_candidates[0] if evaluated_candidates else updated
+                except Exception as exc:  # noqa: BLE001 - keep the queue moving when one candidate fails
+                    message = ai_evaluation_error_message(exc)
+                    updated["ai_evaluation"] = deterministic_candidate_evaluation(
+                        updated,
+                        query,
+                        status="fallback",
+                        reason=f"AI 评分失败，已使用规则兜底：{message}",
+                    )
+                    candidate_summary = {"status": "error", "error": message, "score_source": "deterministic_rules"}
+                updated["client_key"] = client_key
+                with RETRIEVAL_BACKGROUND_LOCK:
+                    job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                    if not job:
+                        return
+                    candidates = job.get("candidates") if isinstance(job.get("candidates"), list) else []
+                    index = next((idx for idx, item in enumerate(candidates) if str(item.get("client_key") or "") == client_key), -1)
+                    if index >= 0:
+                        candidates[index] = updated
+                    if retrieval_candidate_has_ai_model_evaluation(updated):
+                        job["ai_completed_count"] = safe_int(job.get("ai_completed_count")) + 1
+                    else:
+                        job["failed_count"] = safe_int(job.get("failed_count")) + 1
+                        job["error"] = str(candidate_summary.get("error") or "该候选 AI 评分失败，已使用规则兜底。")
+                    job["completed_count"] = safe_int(job.get("completed_count")) + 1
+                    job["candidates"] = sort_candidates_by_ai_evaluation(candidates)
+                    job["message"] = f"AI 已评分 {job['completed_count']}/{job.get('total_count') or len(candidates)} 条。"
+                    job["updated_at"] = now_iso()
+                    job["summary"] = retrieval_ai_scoring_job_summary(job)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                if not job:
+                    return
+                if job.get("stop_requested"):
+                    job["status"] = "canceled"
+                    job["message"] = "AI 推荐排序已停止。"
+                elif safe_int(job.get("failed_count")):
+                    job["status"] = "partial"
+                    job["message"] = "AI 推荐排序部分完成，失败项已使用规则兜底。"
+                else:
+                    job["status"] = "completed"
+                    job["message"] = "AI 推荐排序已完成。"
+                job["finished_at"] = now_iso()
+                job["updated_at"] = job["finished_at"]
+                job["summary"] = retrieval_ai_scoring_job_summary(job)
+        except Exception as exc:  # noqa: BLE001 - surface systemic background failure for the UI
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                if job:
+                    job["status"] = "failed"
+                    job["error"] = str(exc)
+                    job["message"] = "AI 推荐排序失败。"
+                    job["finished_at"] = now_iso()
+                    job["updated_at"] = job["finished_at"]
+                    job["summary"] = retrieval_ai_scoring_job_summary(job)
+        finally:
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RUNNING_RETRIEVAL_AI_SCORING_JOBS.discard(job_id)
+
+    def start_retrieval_ai_scoring_worker(library_id: str, job_id: str) -> None:
+        with RETRIEVAL_BACKGROUND_LOCK:
+            if job_id in RUNNING_RETRIEVAL_AI_SCORING_JOBS:
+                return
+            RUNNING_RETRIEVAL_AI_SCORING_JOBS.add(job_id)
+        if retrieval_background_inline_enabled("ai_scoring"):
+            execute_retrieval_ai_scoring_job(library_id, job_id)
+            return
+        thread = threading.Thread(target=execute_retrieval_ai_scoring_job, args=(library_id, job_id), daemon=True)
+        thread.start()
+
     @app.get("/")
     def index():
         libraries = app_store.list_libraries()
@@ -8430,6 +8959,221 @@ def create_app() -> Flask:
             return jsonify({"ok": True, **result})
         except (SourceError, RetrievalError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/search/jobs")
+    def api_create_retrieval_search_job(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            return jsonify({"ok": False, "error": "检索词不能为空。"}), 400
+        try:
+            library_or_404(library_id)
+            limit = int(payload.get("limit") or 10)
+            sources = payload.get("sources")
+            source_names = [str(source or "").strip().lower() for source in sources or [] if str(source or "").strip()]
+            job_id = retrieval_background_job_id("search")
+            now = now_iso()
+            job = {
+                "job_id": job_id,
+                "library_id": library_id,
+                "type": "search",
+                "query": query,
+                "sources": source_names,
+                "limit": limit,
+                "include_raw": bool(payload.get("include_raw")),
+                "use_ai_evaluation": payload.get("use_ai_evaluation") is not False,
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+                "started_at": "",
+                "finished_at": "",
+                "message": "快速检索已进入后台队列。",
+                "error": "",
+                "stop_requested": False,
+                "candidate_count": 0,
+                "run_id": "",
+                "result": None,
+            }
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RETRIEVAL_SEARCH_JOBS[job_id] = job
+                trim_retrieval_background_jobs(RETRIEVAL_SEARCH_JOBS, library_id)
+            start_retrieval_search_worker(library_id, job_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                snapshot = retrieval_job_snapshot(RETRIEVAL_SEARCH_JOBS.get(job_id))
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/search/jobs/latest")
+    def api_latest_retrieval_search_job(library_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = retrieval_job_snapshot(latest_retrieval_background_job(RETRIEVAL_SEARCH_JOBS, library_id))
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/search/jobs/<job_id>")
+    def api_retrieval_search_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_SEARCH_JOBS.get(job_id)
+                if not job or job.get("library_id") != library_id:
+                    raise ValueError("快速检索任务不存在。")
+                snapshot = retrieval_job_snapshot(job)
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+
+    @app.post("/api/library/<library_id>/retrieval/candidates/evaluate")
+    def api_retrieval_candidates_evaluate(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        query = str(payload.get("query") or "").strip()
+        candidates = payload.get("candidates")
+        if not query:
+            return jsonify({"ok": False, "error": "检索词不能为空。"}), 400
+        if not isinstance(candidates, list) or not candidates:
+            return jsonify({"ok": False, "error": "没有可评分的候选。"}), 400
+        try:
+            library_or_404(library_id)
+            candidate_payloads = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+            if not candidate_payloads:
+                return jsonify({"ok": False, "error": "没有可评分的候选。"}), 400
+            requested_limit = safe_int(payload.get("max_candidates")) or AI_CANDIDATE_MANUAL_EVALUATION_LIMIT
+            max_candidates = max(1, min(requested_limit, AI_CANDIDATE_MANUAL_EVALUATION_LIMIT))
+            ai_candidate_payloads = candidate_payloads[:max_candidates]
+            rule_candidate_payloads = candidate_payloads[max_candidates:]
+            summary = evaluate_retrieval_candidates_with_ai(
+                library_id,
+                query,
+                ai_candidate_payloads,
+                use_ai_evaluation=True,
+            )
+            for candidate in rule_candidate_payloads:
+                candidate["ai_evaluation"] = deterministic_candidate_evaluation(
+                    candidate,
+                    query,
+                    status="skipped",
+                    reason=f"AI 推荐排序已精评前 {len(ai_candidate_payloads)} 条；该候选保留规则评分。",
+                )
+            candidate_payloads = sort_candidates_by_ai_evaluation(ai_candidate_payloads + rule_candidate_payloads)
+            summary["candidate_count"] = len(candidate_payloads)
+            summary["ai_candidate_limit"] = max_candidates
+            summary["ai_evaluated_candidate_count"] = len(ai_candidate_payloads)
+            summary["skipped_candidate_count"] = len(rule_candidate_payloads)
+            if rule_candidate_payloads and summary.get("score_source") == "ai_model":
+                summary["status"] = "partial"
+                summary["score_source"] = "mixed_ai_rules"
+                summary["partial_reason"] = "candidate_limit"
+            summary["decision_counts"] = ai_evaluation_decision_counts(candidate_payloads)
+            summary["auto_selected_count"] = sum(
+                1 for candidate in candidate_payloads if candidate.get("ai_evaluation", {}).get("auto_select")
+            )
+            return jsonify({"ok": True, "candidates": candidate_payloads, "ai_evaluation_summary": summary})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/ai-scoring-jobs")
+    def api_create_retrieval_ai_scoring_job(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        query = str(payload.get("query") or "").strip()
+        candidates = payload.get("candidates")
+        if not query:
+            return jsonify({"ok": False, "error": "检索词不能为空。"}), 400
+        if not isinstance(candidates, list) or not candidates:
+            return jsonify({"ok": False, "error": "没有可评分的候选。"}), 400
+        try:
+            library_or_404(library_id)
+            with use_ai_pixel_config(api_config_model_for_library(library_id)):
+                model_status = retrieval_model_status()
+            if not model_status.get("configured"):
+                raise ValueError("模型未配置，无法启动 AI 推荐排序。")
+            candidate_payloads = [copy.deepcopy(candidate) for candidate in candidates if isinstance(candidate, dict)]
+            if not candidate_payloads:
+                raise ValueError("没有可评分的候选。")
+            candidate_payloads.sort(key=retrieval_candidate_rule_confidence_value, reverse=True)
+            for index, candidate in enumerate(candidate_payloads, start=1):
+                candidate["client_key"] = retrieval_candidate_job_key(candidate, index)
+                candidate["rank"] = index
+            job_id = retrieval_background_job_id("ai-score")
+            job = {
+                "job_id": job_id,
+                "library_id": library_id,
+                "type": "ai_scoring",
+                "query": query,
+                "status": "queued",
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "started_at": "",
+                "finished_at": "",
+                "message": "AI 推荐排序已进入后台队列。",
+                "error": "",
+                "stop_requested": False,
+                "model_status": model_status,
+                "candidates": candidate_payloads,
+                "queue_keys": [str(candidate.get("client_key") or "") for candidate in candidate_payloads],
+                "total_count": len(candidate_payloads),
+                "completed_count": 0,
+                "ai_completed_count": 0,
+                "failed_count": 0,
+                "current_candidate_key": "",
+                "current_candidate_title": "",
+            }
+            job["summary"] = retrieval_ai_scoring_job_summary(job)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RETRIEVAL_AI_SCORING_JOBS[job_id] = job
+                trim_retrieval_background_jobs(RETRIEVAL_AI_SCORING_JOBS, library_id)
+            start_retrieval_ai_scoring_worker(library_id, job_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                snapshot = retrieval_job_snapshot(RETRIEVAL_AI_SCORING_JOBS.get(job_id))
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/ai-scoring-jobs/latest")
+    def api_latest_retrieval_ai_scoring_job(library_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = retrieval_job_snapshot(latest_retrieval_background_job(RETRIEVAL_AI_SCORING_JOBS, library_id))
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/ai-scoring-jobs/<job_id>")
+    def api_retrieval_ai_scoring_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                if not job or job.get("library_id") != library_id:
+                    raise ValueError("AI 推荐排序任务不存在。")
+                snapshot = retrieval_job_snapshot(job)
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+
+    @app.post("/api/library/<library_id>/retrieval/ai-scoring-jobs/<job_id>/cancel")
+    def api_cancel_retrieval_ai_scoring_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_AI_SCORING_JOBS.get(job_id)
+                if not job or job.get("library_id") != library_id:
+                    raise ValueError("AI 推荐排序任务不存在。")
+                status = str(job.get("status") or "")
+                if status in {"queued", "running", "canceling"}:
+                    job["stop_requested"] = True
+                    job["status"] = "canceling"
+                    job["message"] = "正在停止 AI 推荐排序..."
+                    job["updated_at"] = now_iso()
+                    job["summary"] = retrieval_ai_scoring_job_summary(job)
+                snapshot = retrieval_job_snapshot(job)
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
 
     @app.post("/api/library/<library_id>/retrieval/import")
     def api_retrieval_import(library_id: str):
@@ -9428,6 +10172,75 @@ def create_app() -> Flask:
             )
         except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/query-plan/jobs")
+    def api_create_retrieval_query_plan_job(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            seed_query = str(payload.get("seed_query") or payload.get("query") or "robot").strip() or "robot"
+            sample_size = bounded_retrieval_sample_size(payload.get("sample_size"), default=5)
+            limit = max(1, min(int(payload.get("limit") or 5), 10))
+            raw_use_ai = payload.get("use_ai")
+            use_ai = bool(raw_use_ai) if isinstance(raw_use_ai, bool) else truthy_query_flag(raw_use_ai)
+            selected_sources = payload.get("sources") or payload.get("source") or []
+            if not isinstance(selected_sources, list):
+                selected_sources = [selected_sources]
+            selected_sources = [str(source or "").strip() for source in selected_sources if str(source or "").strip()]
+            job_id = retrieval_background_job_id("query-plan")
+            now = now_iso()
+            job = {
+                "job_id": job_id,
+                "library_id": library_id,
+                "type": "query_plan",
+                "seed_query": seed_query,
+                "sample_size": sample_size,
+                "limit": limit,
+                "use_ai": use_ai,
+                "selected_sources": selected_sources,
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+                "started_at": "",
+                "finished_at": "",
+                "message": "AI 检索计划已进入后台队列。",
+                "error": "",
+                "stop_requested": False,
+                "plan": None,
+                "query_count": 0,
+            }
+            with RETRIEVAL_BACKGROUND_LOCK:
+                RETRIEVAL_QUERY_PLAN_JOBS[job_id] = job
+                trim_retrieval_background_jobs(RETRIEVAL_QUERY_PLAN_JOBS, library_id)
+            start_retrieval_query_plan_worker(library_id, job_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                snapshot = retrieval_job_snapshot(RETRIEVAL_QUERY_PLAN_JOBS.get(job_id))
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/query-plan/jobs/latest")
+    def api_latest_retrieval_query_plan_job(library_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = retrieval_job_snapshot(latest_retrieval_background_job(RETRIEVAL_QUERY_PLAN_JOBS, library_id))
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/query-plan/jobs/<job_id>")
+    def api_retrieval_query_plan_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            with RETRIEVAL_BACKGROUND_LOCK:
+                job = RETRIEVAL_QUERY_PLAN_JOBS.get(job_id)
+                if not job or job.get("library_id") != library_id:
+                    raise ValueError("AI 检索计划任务不存在。")
+                snapshot = retrieval_job_snapshot(job)
+            return jsonify({"ok": True, "job": snapshot})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
 
     @app.get("/api/library/<library_id>/retrieval/query-plan")
     def api_retrieval_query_plan(library_id: str):

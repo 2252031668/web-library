@@ -1945,6 +1945,45 @@ def test_retrieval_query_plan_api_reports_unconfigured_ai_without_key(
     assert "AI_PIXEL_API_KEY" in plan["ai_enhancement"]["message"]
 
 
+def test_retrieval_query_plan_job_runs_inline_and_can_be_restored(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_QUERY_PLAN_INLINE", "1")
+    library = create_read_only_source(zotero_fixture, name="Query Plan Job")
+    calls: list[dict[str, object]] = []
+
+    def fake_query_plan(library_id: str, **kwargs) -> dict[str, object]:
+        calls.append({"library_id": library_id, **kwargs})
+        return {
+            "seed_query": kwargs["seed_query"],
+            "query_count": 1,
+            "query_text": "background robot",
+            "message": "Background query plan ready.",
+            "queries": [{"query": "background robot", "sources": ["crossref"], "reason": "job test"}],
+        }
+
+    monkeypatch.setattr(web, "retrieval_query_plan_for_library", fake_query_plan)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/query-plan/jobs",
+        json={"seed_query": "robot", "sources": ["crossref"], "use_ai": True, "limit": 3},
+    )
+
+    assert response.status_code == 200
+    job = response.get_json()["job"]
+    assert job["status"] == "completed"
+    assert job["plan"]["query_text"] == "background robot"
+    assert calls[0]["seed_query"] == "robot"
+    assert calls[0]["use_ai"] is True
+    latest = client.get(f"/api/library/{library['library_id']}/retrieval/query-plan/jobs/latest").get_json()["job"]
+    assert latest["job_id"] == job["job_id"]
+    assert latest["status"] == "completed"
+
+
 def test_http_json_field_map_suggestion_samples_configured_source() -> None:
     seen_urls: list[str] = []
     config = {
@@ -2770,6 +2809,40 @@ def test_retrieval_search_api_uses_shared_service(
     assert payload["candidates"][0]["title"] == "API Candidate"
 
 
+def test_retrieval_search_job_runs_inline_and_can_be_restored(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_SEARCH_INLINE", "1")
+    library = create_read_only_source(zotero_fixture)
+
+    def fake_search(query: str, **kwargs):
+        return {
+            "query": query,
+            "sources": kwargs["sources"],
+            "candidates": [{"source": "crossref", "title": "Background Search Candidate"}],
+            "source_stats": {"crossref": {"ok": True, "count": 1, "error": ""}},
+        }
+
+    monkeypatch.setattr(web, "search_retrieval", fake_search)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/search/jobs",
+        json={"query": "robot", "sources": ["crossref"], "limit": 5, "use_ai_evaluation": False},
+    )
+
+    assert response.status_code == 200
+    job = response.get_json()["job"]
+    assert job["status"] == "completed"
+    assert job["candidate_count"] == 1
+    assert job["result"]["run_id"].startswith("run-")
+    assert job["result"]["candidates"][0]["title"] == "Background Search Candidate"
+    latest = client.get(f"/api/library/{library['library_id']}/retrieval/search/jobs/latest").get_json()["job"]
+    assert latest["job_id"] == job["job_id"]
+    assert latest["status"] == "completed"
+
+
 def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2813,7 +2886,12 @@ def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
         captured["url"] = url
         captured["headers"] = headers
         captured["payload"] = payload
+        captured["timeout"] = timeout
+        system_content = payload["messages"][0]["content"]  # type: ignore[index]
         user_content = payload["messages"][1]["content"]  # type: ignore[index]
+        assert "final_confidence_score" in system_content
+        assert "topic_relevance_score" in system_content
+        assert "reason 必须使用简洁中文" in system_content
         assert "do-not-send" not in user_content
         assert "raw" not in user_content
         assert "Speculative Decoding" in user_content
@@ -2827,8 +2905,11 @@ def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
                                     {
                                         "candidate_id": "candidate-1",
                                         "decision": "recommend",
-                                        "relevance_score": 0.95,
-                                        "quality_score": 0.9,
+                                        "topic_relevance_score": 95,
+                                        "metadata_quality_score": 90,
+                                        "source_evidence_score": 92,
+                                        "import_risk_score": 12,
+                                        "final_confidence_score": 93,
                                         "risk_level": "low",
                                         "reason": "Highly relevant and complete metadata.",
                                         "missing_fields": [],
@@ -2836,8 +2917,11 @@ def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
                                     {
                                         "candidate_id": "unknown",
                                         "decision": "recommend",
-                                        "relevance_score": 1,
-                                        "quality_score": 1,
+                                        "topic_relevance_score": 100,
+                                        "metadata_quality_score": 100,
+                                        "source_evidence_score": 100,
+                                        "import_risk_score": 5,
+                                        "final_confidence_score": 99,
                                         "risk_level": "low",
                                         "reason": "Invalid id.",
                                         "missing_fields": [],
@@ -2860,6 +2944,8 @@ def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
     assert captured["url"] == "https://ai-pixel.online/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret"
     assert captured["payload"]["model"] == "gpt-5.5"
+    assert captured["payload"]["max_tokens"] == 1800
+    assert captured["timeout"] == 90
     assert summary["status"] == "evaluated"
     assert summary["accepted_evaluation_count"] == 1
     assert summary["rejected_evaluation_count"] == 1
@@ -2913,8 +2999,11 @@ def test_ai_candidate_evaluation_batches_large_candidate_sets(
                                     {
                                         "candidate_id": item["candidate_id"],
                                         "decision": "recommend",
-                                        "relevance_score": 0.9,
-                                        "quality_score": 0.85,
+                                        "topic_relevance_score": 90,
+                                        "metadata_quality_score": 85,
+                                        "source_evidence_score": 88,
+                                        "import_risk_score": 16,
+                                        "final_confidence_score": 89,
                                         "risk_level": "low",
                                         "reason": "Relevant metadata.",
                                         "missing_fields": [],
@@ -2935,11 +3024,84 @@ def test_ai_candidate_evaluation_batches_large_candidate_sets(
         ai_post_json=fake_post_json,
     )
 
-    assert batch_sizes == [20, 20, 5]
-    assert summary["evaluation_batch_count"] == 3
+    assert batch_sizes == [5, 5, 5, 5, 5, 5, 5, 5, 5]
+    assert summary["evaluation_batch_count"] == 9
     assert summary["accepted_evaluation_count"] == 45
     assert summary["auto_selected_count"] == 45
     assert all(candidate["ai_evaluation"]["decision"] == "recommend" for candidate in candidates)
+
+
+def test_ai_candidate_evaluation_keeps_successful_batches_when_later_batch_times_out(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    app_store.set_preference(
+        library["library_id"],
+        web.API_CONFIG_PREFERENCE_KEY,
+        {"model": {"model": "gpt-5.5", "base_url": "https://ai-pixel.online", "api_key": "secret"}, "code_sources": {}},
+    )
+    candidates = [
+        {
+            "source": "crossref",
+            "title": f"Speculative Decoding Candidate {index}",
+            "abstract": "Speculative decoding speeds up model inference.",
+            "identifiers": {"doi": f"10.1000/spec-{index}"},
+            "item": {"fields": {"title": f"Speculative Decoding Candidate {index}", "DOI": f"10.1000/spec-{index}"}},
+        }
+        for index in range(6)
+    ]
+    call_count = 0
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise TimeoutError("The read operation timed out")
+        task = json.loads(payload["messages"][1]["content"])  # type: ignore[index]
+        metadata = task["candidates"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "evaluations": [
+                                    {
+                                        "candidate_id": item["candidate_id"],
+                                        "decision": "recommend",
+                                        "topic_relevance_score": 90,
+                                        "metadata_quality_score": 85,
+                                        "source_evidence_score": 88,
+                                        "import_risk_score": 16,
+                                        "final_confidence_score": 89,
+                                        "risk_level": "low",
+                                        "reason": "Relevant metadata.",
+                                        "missing_fields": [],
+                                    }
+                                    for item in metadata
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    summary = web.evaluate_retrieval_candidates_with_ai(
+        library["library_id"],
+        "speculative decoding",
+        candidates,
+        ai_post_json=fake_post_json,
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["score_source"] == "mixed_ai_rules"
+    assert summary["accepted_evaluation_count"] == 5
+    assert summary["failed_batch_count"] == 1
+    assert "timed out" in summary["error"]
+    assert candidates[0]["ai_evaluation"]["score_source"] == "ai_model"
+    assert candidates[-1]["ai_evaluation"]["status"] == "fallback"
 
 
 def test_retrieval_search_api_adds_ai_evaluation_and_strict_auto_select(
@@ -2980,14 +3142,17 @@ def test_retrieval_search_api_adds_ai_evaluation_and_strict_auto_select(
             ],
         }
 
-    def fake_ai(messages, post_json=None):
+    def fake_ai(messages, post_json=None, max_tokens=900, timeout_seconds=None):
         return {
             "evaluations": [
                 {
                     "candidate_id": "candidate-1",
                     "decision": "recommend",
-                    "relevance_score": 0.92,
-                    "quality_score": 0.88,
+                    "topic_relevance_score": 92,
+                    "metadata_quality_score": 88,
+                    "source_evidence_score": 86,
+                    "import_risk_score": 14,
+                    "final_confidence_score": 90,
                     "risk_level": "low",
                     "reason": "Strong metadata.",
                     "missing_fields": [],
@@ -2995,8 +3160,11 @@ def test_retrieval_search_api_adds_ai_evaluation_and_strict_auto_select(
                 {
                     "candidate_id": "candidate-2",
                     "decision": "review",
-                    "relevance_score": 0.7,
-                    "quality_score": 0.6,
+                    "topic_relevance_score": 70,
+                    "metadata_quality_score": 60,
+                    "source_evidence_score": 54,
+                    "import_risk_score": 45,
+                    "final_confidence_score": 66,
                     "risk_level": "medium",
                     "reason": "Needs checking.",
                     "missing_fields": ["authors"],
@@ -6105,6 +6273,164 @@ def test_retrieval_search_api_rejects_empty_query(
 
     assert response.status_code == 400
     assert response.get_json()["ok"] is False
+
+
+def test_retrieval_candidates_evaluate_scores_existing_candidates(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    calls: list[tuple[str, str, bool]] = []
+
+    def fake_evaluate(library_id: str, query: str, candidates: list[dict], **kwargs):
+        calls.append((library_id, query, kwargs["use_ai_evaluation"]))
+        for index, candidate in enumerate(candidates):
+            decision = "recommend" if candidate["title"] == "Relevant Candidate" else "review"
+            candidate["ai_evaluation"] = {
+                "status": "evaluated",
+                "score_source": "ai_model",
+                "decision": decision,
+                "auto_select": decision == "recommend",
+                "final_confidence_score": 0.91 if decision == "recommend" else 0.45,
+                "reason": "AI rerank test",
+            }
+            candidate["rank"] = index + 1
+        candidates.sort(key=lambda candidate: candidate["ai_evaluation"]["final_confidence_score"], reverse=True)
+        return {
+            "status": "evaluated",
+            "score_source": "ai_model",
+            "score_framework": "ai_rubric_v1",
+            "auto_selected_count": 1,
+            "decision_counts": {"recommend": 1, "review": 1, "reject": 0},
+        }
+
+    monkeypatch.setattr(web, "evaluate_retrieval_candidates_with_ai", fake_evaluate)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/candidates/evaluate",
+        json={
+            "query": "robot",
+            "candidates": [
+                {"title": "Less Relevant Candidate", "source": "crossref"},
+                {"title": "Relevant Candidate", "source": "arxiv"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert calls == [(library["library_id"], "robot", True)]
+    assert payload["ai_evaluation_summary"]["score_source"] == "ai_model"
+    assert payload["candidates"][0]["title"] == "Relevant Candidate"
+    assert payload["candidates"][0]["ai_evaluation"]["auto_select"] is True
+
+
+def test_retrieval_candidates_evaluate_limits_manual_ai_scoring(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    calls: list[int] = []
+
+    def fake_evaluate(library_id: str, query: str, candidates: list[dict], **kwargs):
+        calls.append(len(candidates))
+        for candidate in candidates:
+            candidate["ai_evaluation"] = {
+                "status": "evaluated",
+                "score_source": "ai_model",
+                "decision": "recommend",
+                "auto_select": True,
+                "final_confidence_score": 90,
+            }
+        return {
+            "status": "evaluated",
+            "score_source": "ai_model",
+            "score_framework": "ai_rubric_v1",
+            "auto_selected_count": len(candidates),
+            "decision_counts": {"recommend": len(candidates), "review": 0, "reject": 0},
+        }
+
+    monkeypatch.setattr(web, "evaluate_retrieval_candidates_with_ai", fake_evaluate)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/candidates/evaluate",
+        json={
+            "query": "robot",
+            "candidates": [{"title": f"Candidate {index}", "source": "crossref"} for index in range(12)],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert calls == [10]
+    assert payload["ai_evaluation_summary"]["status"] == "partial"
+    assert payload["ai_evaluation_summary"]["score_source"] == "mixed_ai_rules"
+    assert payload["ai_evaluation_summary"]["partial_reason"] == "candidate_limit"
+    assert payload["ai_evaluation_summary"]["skipped_candidate_count"] == 2
+    assert len(payload["candidates"]) == 12
+    assert sum(1 for candidate in payload["candidates"] if candidate["ai_evaluation"]["status"] == "skipped") == 2
+
+
+def test_retrieval_ai_scoring_job_runs_inline_and_can_be_restored(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_AI_SCORING_INLINE", "1")
+    library = create_local_copy(zotero_fixture)
+    app_store.set_preference(
+        library["library_id"],
+        web.API_CONFIG_PREFERENCE_KEY,
+        {"model": {"model": "gpt-5.5", "base_url": "https://ai-pixel.online", "api_key": "secret"}, "code_sources": {}},
+    )
+    calls: list[str] = []
+
+    def fake_evaluate(library_id: str, query: str, candidates: list[dict], **kwargs):
+        calls.append(candidates[0]["title"])
+        decision = "recommend" if candidates[0]["title"] == "High Confidence" else "review"
+        candidates[0]["ai_evaluation"] = {
+            "status": "evaluated",
+            "score_source": "ai_model",
+            "score_framework": "ai_rubric_v1",
+            "decision": decision,
+            "auto_select": decision == "recommend",
+            "final_confidence_score": 95 if decision == "recommend" else 65,
+            "reason": "后台 AI 评分测试",
+        }
+        return {
+            "status": "evaluated",
+            "score_source": "ai_model",
+            "score_framework": "ai_rubric_v1",
+            "auto_selected_count": 1 if decision == "recommend" else 0,
+            "decision_counts": {"recommend": 1 if decision == "recommend" else 0, "review": 0 if decision == "recommend" else 1, "reject": 0},
+        }
+
+    monkeypatch.setattr(web, "evaluate_retrieval_candidates_with_ai", fake_evaluate)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/ai-scoring-jobs",
+        json={
+            "query": "robot",
+            "candidates": [
+                {"title": "Low Confidence", "source": "crossref", "confidence": 0.2},
+                {"title": "High Confidence", "source": "arxiv", "confidence": 0.9},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    job = response.get_json()["job"]
+    assert job["status"] == "completed"
+    assert calls == ["High Confidence", "Low Confidence"]
+    assert job["completed_count"] == 2
+    assert job["summary"]["score_source"] == "ai_model"
+    assert job["summary"]["auto_selected_count"] == 1
+    assert all(candidate["ai_evaluation"]["score_source"] == "ai_model" for candidate in job["candidates"])
+    latest = client.get(f"/api/library/{library['library_id']}/retrieval/ai-scoring-jobs/latest").get_json()["job"]
+    assert latest["job_id"] == job["job_id"]
+    assert latest["status"] == "completed"
 
 
 def test_imported_items_from_retrieval_candidates_accepts_search_payload() -> None:

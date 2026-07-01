@@ -175,7 +175,7 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "本地 / 内部系统" in app_js
     assert "simple-retrieval-guide" in app_js
     assert "retrieval-advanced" in app_js
-    assert "高级：配置数据源" in app_js
+    assert "高级设置" in app_js
     assert "function renderRetrievalSourceConfigGuide" in app_js
     assert "function renderRetrievalSourceConfigHeader" in app_js
     assert "公共源按资料类型分类" in app_js
@@ -210,8 +210,19 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "function formatRateLimitSeconds" in app_js
     assert "function renderCandidateAiEvaluation" in app_js
     assert "retrievalAiEvaluationSummary" in app_js
+    assert "data-score-retrieval-candidates-ai" in app_js
+    assert "function scoreRetrievalCandidatesWithAi" in app_js
+    assert "/retrieval/ai-scoring-jobs" in app_js
+    assert "function retrievalCandidateIsAiRecommended" in app_js
+    assert "function applyRetrievalAiScoringJob" in app_js
+    assert "function loadLatestRetrievalAiScoringJob" in app_js
+    assert "后台 AI 推荐排序中" in app_js
+    assert "data-stop-retrieval-ai-scoring" in app_js
+    assert "function stopRetrievalAiScoring" in app_js
+    assert "AbortController" in app_js
     assert "data-simple-ai-query-plan" in app_js
     assert "按计划批量检索" in app_js
+    assert "调用多源接口" not in app_js
     assert "simplePlanBatchJobId" in app_js
     assert "data-simple-plan-batch-status" in app_js
     assert 'data-select-retrieval-candidates="ai"' in app_js
@@ -544,9 +555,21 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "weak_similarity_matches" in app_js
     assert "candidate_ids" in app_js
     assert "/retrieval/search" in app_js
+    assert "/retrieval/search/jobs" in app_js
+    assert "function applyRetrievalSearchJob" in app_js
+    assert "function loadLatestRetrievalSearchJob" in app_js
     assert "/retrieval/import" in app_js
     assert "/retrieval/runs" in app_js
+    assert "function loadRetrievalRunCandidates" in app_js
+    assert "data-load-retrieval-run-candidates" in app_js
+    assert "恢复结果" in app_js
     assert "/retrieval/batches" in app_js
+    assert "/retrieval/query-plan/jobs" in app_js
+    assert "/retrieval/ai-scoring-jobs" in app_js
+    assert "function applyRetrievalQueryPlanJob" in app_js
+    assert "function applyRetrievalAiScoringJob" in app_js
+    assert "function loadLatestRetrievalQueryPlanJob" in app_js
+    assert "function loadLatestRetrievalAiScoringJob" in app_js
     assert "data-retrieval-runs" in app_js
     assert "data-retrieval-batches" in app_js
     assert "data-retrieval-batch-form" in app_js
@@ -572,9 +595,10 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".feature-strip" in app_css
     assert "data-retrieval-page" in features_html
     assert "data-retrieval-page-panel" in features_html
-    assert "多源异构数据检索" in features_html
-    assert "Source intake" in features_html
-    assert "ONB ZIP" in features_html
+    assert "多源检索" in features_html
+    assert "feature-topbar" in features_html
+    assert "推荐流程" not in features_html
+    assert "什么时候打开高级区" not in features_html
     assert ".simple-retrieval-guide" in app_css
     assert ".simple-search-form" in app_css
     assert ".simple-section-title" in app_css
@@ -582,6 +606,7 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".simple-source-category" in app_css
     assert ".simple-source-option" in app_css
     assert ".simple-result-tools" in app_css
+    assert ".retrieval-ai-row.evaluating" in app_css
     assert ".simple-plan-source-limits" in app_css
     assert ".simple-plan-source-limit-grid" in app_css
     assert ".retrieval-advanced" in app_css
@@ -868,7 +893,7 @@ def test_features_index_page_points_to_library_selection() -> None:
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "多源异构数据检索" in html
+    assert "多源检索" in html
     assert "选择文库" in html
     assert "href=\"/\"" in html
 
@@ -884,10 +909,9 @@ def test_library_features_page_mounts_retrieval_workspace(
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "多源异构数据检索" in html
+    assert "多源检索" in html
     assert "data-retrieval-page" in html
     assert "data-retrieval-page-panel" in html
-    assert "当前文库" in html
     assert "返回文库" in html
 
 
