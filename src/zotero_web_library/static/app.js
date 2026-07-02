@@ -101,7 +101,11 @@ const state = {
   retrievalCandidates: [],
   retrievalSelectedKeys: new Set(),
   retrievalStats: null,
+  retrievalSearchJobId: "",
   retrievalAiEvaluationSummary: null,
+  retrievalAiEvaluationBusy: false,
+  retrievalAiEvaluationStopRequested: false,
+  retrievalAiScoringJobId: "",
   retrievalRunId: "",
   retrievalRuns: [],
   retrievalRunsBusy: false,
@@ -170,6 +174,7 @@ const state = {
   retrievalBatchQueries: "",
   retrievalQueryPlan: null,
   retrievalQueryPlanBusy: false,
+  retrievalQueryPlanJobId: "",
   retrievalQueryPlanUseAi: false,
   retrievalBatchJobs: [],
   retrievalBatchBusy: false,
@@ -213,12 +218,17 @@ const state = {
 };
 
 let retrievalBatchRefreshTimer = null;
+let retrievalSearchPollTimer = null;
+let retrievalAiEvaluationAbortController = null;
+let retrievalAiScoringPollTimer = null;
+let retrievalQueryPlanPollTimer = null;
 
-function postJSON(url, payload, method = "POST") {
+function postJSON(url, payload, method = "POST", options = {}) {
   return fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    signal: options.signal,
   }).then(async (response) => {
     const data = await parseJSONResponse(response);
     if (!response.ok || data.ok === false) throw new Error(data.error || data.message || "请求失败");
@@ -750,6 +760,84 @@ function normalizeRetrievalCandidates(candidates) {
   }));
 }
 
+function retrievalCandidateRuleConfidence(candidate) {
+  const confidence = Number(candidate?.confidence);
+  if (Number.isFinite(confidence) && confidence > 0) return confidence > 1 ? confidence / 100 : confidence;
+  const evaluation = candidate?.ai_evaluation || {};
+  const finalConfidence = Number(evaluation.final_confidence_score);
+  if (Number.isFinite(finalConfidence) && finalConfidence > 0) return finalConfidence > 1 ? finalConfidence / 100 : finalConfidence;
+  const sourceCount = Number(candidate?.source_count || (Array.isArray(candidate?.sources) ? candidate.sources.length : 0) || 0);
+  return Math.min(0.95, 0.45 + sourceCount * 0.08);
+}
+
+function retrievalCandidateHasAiModelEvaluation(candidate) {
+  const evaluation = candidate?.ai_evaluation || {};
+  return evaluation.score_source === "ai_model" || evaluation.status === "evaluated";
+}
+
+function retrievalCandidateIsAiRecommended(candidate) {
+  return retrievalCandidateHasAiModelEvaluation(candidate)
+    && String(candidate?.ai_evaluation?.decision || "").toLowerCase() === "recommend";
+}
+
+function retrievalCandidateDecisionWeight(candidate) {
+  const decision = String(candidate?.ai_evaluation?.decision || "review").toLowerCase();
+  if (decision === "recommend") return 0;
+  if (decision === "reject") return 2;
+  return 1;
+}
+
+function retrievalCandidateAiConfidence(candidate) {
+  const value = Number(candidate?.ai_evaluation?.final_confidence_score);
+  if (!Number.isFinite(value)) return 0;
+  return value > 1 ? value : value * 100;
+}
+
+function sortRetrievalCandidatesForAiProgress() {
+  state.retrievalCandidates.sort((left, right) => {
+    const leftAi = retrievalCandidateHasAiModelEvaluation(left);
+    const rightAi = retrievalCandidateHasAiModelEvaluation(right);
+    if (leftAi !== rightAi) return leftAi ? -1 : 1;
+    if (leftAi && rightAi) {
+      const decisionDiff = retrievalCandidateDecisionWeight(left) - retrievalCandidateDecisionWeight(right);
+      if (decisionDiff) return decisionDiff;
+      return retrievalCandidateAiConfidence(right) - retrievalCandidateAiConfidence(left);
+    }
+    return retrievalCandidateRuleConfidence(right) - retrievalCandidateRuleConfidence(left);
+  });
+  state.retrievalCandidates.forEach((candidate, index) => {
+    candidate.rank = index + 1;
+  });
+}
+
+function buildRetrievalAiProgressSummary(status = "evaluating", error = "") {
+  const aiCandidates = state.retrievalCandidates.filter(retrievalCandidateHasAiModelEvaluation);
+  const counts = { recommend: 0, review: 0, reject: 0 };
+  aiCandidates.forEach((candidate) => {
+    const decision = String(candidate.ai_evaluation?.decision || "review").toLowerCase();
+    if (counts[decision] != null) counts[decision] += 1;
+  });
+  const failedCount = state.retrievalCandidates.filter((candidate) => candidate.ai_evaluation?.status === "fallback").length;
+  const allEvaluated = aiCandidates.length >= state.retrievalCandidates.length;
+  const scoreSource = aiCandidates.length && allEvaluated ? "ai_model" : (aiCandidates.length ? "mixed_ai_rules" : "deterministic_rules");
+  return {
+    requested: true,
+    configured: state.retrievalModelStatus?.configured === true,
+    provider: state.retrievalModelStatus?.provider || "",
+    model: state.retrievalModelStatus?.model || "",
+    score_source: scoreSource,
+    score_framework: aiCandidates.length ? "ai_rubric_v1" : "metadata_rules_v1",
+    status: allEvaluated && status !== "error" ? "evaluated" : status,
+    candidate_count: state.retrievalCandidates.length,
+    ai_evaluated_candidate_count: aiCandidates.length,
+    skipped_candidate_count: Math.max(0, state.retrievalCandidates.length - aiCandidates.length),
+    failed_batch_count: failedCount,
+    auto_selected_count: aiCandidates.filter((candidate) => candidate.ai_evaluation?.auto_select === true).length,
+    decision_counts: counts,
+    error,
+  };
+}
+
 function retrievalCreatorLine(candidate) {
   const creators = candidate.creators || candidate.item?.creators || [];
   const names = creators.map((creator) => {
@@ -779,20 +867,38 @@ function renderRetrievalAiSummary() {
   if (!summary) return "";
   const counts = summary.decision_counts || {};
   const parts = [
-    `状态 ${summary.status || "skipped"}`,
+    `评分 ${retrievalEvaluationSourceLabel(summary)}`,
     `推荐 ${Number(counts.recommend || 0)}`,
     `复核 ${Number(counts.review || 0)}`,
     `不建议 ${Number(counts.reject || 0)}`,
     `默认勾选 ${Number(summary.auto_selected_count || 0)}`,
   ];
+  if (summary.status === "partial") parts.push("部分 AI 完成");
+  if (Number(summary.accepted_evaluation_count || 0)) parts.push(`AI ${Number(summary.accepted_evaluation_count || 0)} 条`);
+  if (Number(summary.skipped_candidate_count || 0)) parts.push(`规则 ${Number(summary.skipped_candidate_count || 0)} 条`);
+  if (Number(summary.failed_batch_count || 0)) parts.push(`失败批次 ${Number(summary.failed_batch_count || 0)}`);
   if (summary.status === "not_configured") parts.push("模型未配置");
+  if (summary.score_framework === "ai_rubric_v1") parts.push("Rubric 评分");
   if (summary.error) parts.push(summary.error);
   return `<div class="retrieval-ai-summary">${parts.map((part) => `<span>${escapeHtml(part)}</span>`).join("")}</div>`;
 }
 
+function retrievalEvaluationSourceLabel(evaluation) {
+  const status = String(evaluation?.status || "");
+  const source = String(evaluation?.score_source || "");
+  if (source === "ai_model" || status === "evaluated") return "AI评分";
+  if (source === "mixed_ai_rules" || status === "partial") return "AI部分评分";
+  if (status === "not_configured") return "规则兜底";
+  if (status === "fallback" || status === "error") return "规则兜底";
+  if (status === "skipped") return "规则评分";
+  return source === "deterministic_rules" ? "规则兜底" : "待评分";
+}
+
 function formatPercent(value) {
   const number = Number(value || 0);
-  return `${Math.round(number * 100)}%`;
+  if (!Number.isFinite(number)) return "";
+  const percent = number <= 1 ? number * 100 : number;
+  return `${Math.round(Math.max(0, Math.min(100, percent)))}%`;
 }
 
 function renderRetrievalSummary() {
@@ -866,6 +972,12 @@ function retrievalAiRiskLabel(risk) {
   if (risk === "high") return "高风险";
   if (risk === "low") return "低风险";
   return "中风险";
+}
+
+function aiScoreValue(ai, key, legacyKey = "") {
+  if (ai?.[key] != null) return ai[key];
+  if (legacyKey && ai?.[legacyKey] != null) return ai[legacyKey];
+  return null;
 }
 
 const SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE = {
@@ -981,17 +1093,30 @@ function renderRetrievalZoteroPreview(candidate) {
 
 function renderCandidateAiEvaluation(candidate) {
   const ai = candidate.ai_evaluation || null;
+  if (ai?.status === "evaluating") {
+    return `<span class="retrieval-ai-row evaluating">
+      <strong>AI评分中</strong>
+      <em>正在根据主题和元数据逐条判断</em>
+    </span>`;
+  }
   if (!ai || !ai.decision) return "";
   const decision = String(ai.decision || "review");
   const reason = String(ai.reason || "").trim();
+  const finalConfidence = aiScoreValue(ai, "final_confidence_score");
+  const topicRelevance = aiScoreValue(ai, "topic_relevance_score", "relevance_score");
+  const metadataQuality = aiScoreValue(ai, "metadata_quality_score", "quality_score");
+  const sourceEvidence = aiScoreValue(ai, "source_evidence_score");
+  const importRisk = aiScoreValue(ai, "import_risk_score");
   const scores = [
-    ai.relevance_score != null ? `相关 ${Math.round(Number(ai.relevance_score || 0) * 100)}%` : "",
-    ai.quality_score != null ? `质量 ${Math.round(Number(ai.quality_score || 0) * 100)}%` : "",
-    ai.risk_level ? retrievalAiRiskLabel(ai.risk_level) : "",
+    finalConfidence != null ? `置信 ${formatPercent(finalConfidence)}` : "",
+    topicRelevance != null ? `主题 ${formatPercent(topicRelevance)}` : "",
+    metadataQuality != null ? `元数据 ${formatPercent(metadataQuality)}` : "",
+    sourceEvidence != null ? `证据 ${formatPercent(sourceEvidence)}` : "",
+    importRisk != null ? `导入风险 ${formatPercent(importRisk)}` : (ai.risk_level ? retrievalAiRiskLabel(ai.risk_level) : ""),
     ai.auto_select ? "已默认勾选" : "",
   ].filter(Boolean).join(" · ");
   return `<span class="retrieval-ai-row ${escapeHtml(decision)}">
-    <strong>AI：${escapeHtml(retrievalAiDecisionLabel(decision))}</strong>
+    <strong>${escapeHtml(retrievalEvaluationSourceLabel(ai))}：${escapeHtml(retrievalAiDecisionLabel(decision))}</strong>
     ${scores ? `<em>${escapeHtml(scores)}</em>` : ""}
     ${reason ? `<small>${escapeHtml(reason)}</small>` : ""}
   </span>`;
@@ -1030,6 +1155,7 @@ function renderRetrievalRuns() {
       </div>
       <div class="retrieval-history-sources">${retrievalRunSourceBadges(run)}</div>
       <div class="retrieval-report-actions">
+        <button type="button" class="mini-icon retrieval-report-btn" data-load-retrieval-run-candidates="${escapeHtml(run.run_id || "")}" title="恢复这次检索结果">恢复结果</button>
         <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="markdown" title="下载 Markdown 报告">MD</button>
         <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="csv" title="下载 CSV 报告">CSV</button>
         <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-report="${escapeHtml(run.run_id || "")}" data-report-format="json" title="下载 JSON 报告">JSON</button>
@@ -1124,8 +1250,7 @@ function setRetrievalCandidateSelection(mode) {
     });
   } else if (mode === "ai") {
     state.retrievalCandidates.forEach((candidate) => {
-      const decision = String(candidate.ai_evaluation?.decision || "").toLowerCase();
-      if (candidate.client_key && decision === "recommend") state.retrievalSelectedKeys.add(candidate.client_key);
+      if (candidate.client_key && retrievalCandidateIsAiRecommended(candidate)) state.retrievalSelectedKeys.add(candidate.client_key);
     });
   }
   renderRetrievalPage();
@@ -2143,6 +2268,14 @@ function retrievalBatchIsActive(job) {
   return ["queued", "running"].includes(String(job?.status || ""));
 }
 
+function retrievalBackgroundJobIsActive(job) {
+  return ["queued", "running", "canceling"].includes(String(job?.status || ""));
+}
+
+function retrievalBackgroundJobIsTerminal(job) {
+  return ["completed", "partial", "canceled", "failed"].includes(String(job?.status || ""));
+}
+
 function formatRetrievalEta(seconds) {
   const value = Number(seconds || 0);
   if (!value) return "";
@@ -2450,7 +2583,7 @@ function renderSimplePlanBatchStatus() {
       : `批量检索${status}：${completed}/${total}`;
   const note = active
     ? "页面会自动刷新进度；完成后会把合并候选显示到下方候选结果。"
-    : "批量结果已进入下方候选结果；如果没有显示，可点右侧重新加载。";
+    : "批量结果已进入下方候选结果；如果没有显示，可重新加载。";
   const loadButton = !active && candidates
     ? `<button type="button" class="mini-icon retrieval-report-btn" data-load-simple-batch-candidates="${escapeHtml(job.job_id || "")}" ${state.simplePlanBatchCandidatesBusy ? "disabled" : ""}>${state.simplePlanBatchCandidatesBusy ? "加载中..." : "查看批量结果"}</button>`
     : "";
@@ -2485,121 +2618,139 @@ function renderSimpleAiQueryPlan() {
   const plan = state.retrievalQueryPlan || null;
   const queries = Array.isArray(plan?.queries) ? plan.queries : [];
   const aiConfigured = state.retrievalModelStatus?.configured === true;
-  const statusText = aiConfigured ? "模型已配置，会请求 AI 生成 3-5 条相关检索式。" : "模型未配置时只能生成规则计划；请先到 API 配置页填写模型 key。";
   const batchJob = currentSimplePlanBatchJob();
   const batchActive = retrievalBatchIsActive(batchJob);
   const batchButtonDisabled = state.retrievalBatchBusy || state.simplePlanBatchCandidatesBusy || batchActive;
   const batchButtonText = batchActive ? "批量检索中..." : "按计划批量检索";
-  return `<section class="simple-ai-plan">
+  const statusText = queries.length
+    ? `${queries.length} 条检索词已准备好，确认后按计划批量检索。`
+    : aiConfigured
+      ? "AI 会先拆解主题，再批量检索。"
+      : "模型未配置，当前只能生成规则计划草案。";
+  if (!queries.length && !batchJob && !state.retrievalBatchMessage) return "";
+  return `<section class="simple-ai-plan ${queries.length ? "has-plan" : "empty"}">
     <div class="simple-ai-plan-head">
       <div>
-        <strong>计划检索</strong>
+        <strong>${queries.length ? "AI 检索计划" : "深度检索状态"}</strong>
         <span>${escapeHtml(statusText)}</span>
       </div>
       <div class="simple-result-tools">
-        <button type="button" class="mini-icon retrieval-report-btn" data-simple-ai-query-plan ${state.retrievalQueryPlanBusy ? "disabled" : ""}>${state.retrievalQueryPlanBusy ? "生成中..." : "生成计划"}</button>
-        ${queries.length ? `<button type="button" class="mini-icon retrieval-report-btn" data-simple-plan-batch ${batchButtonDisabled ? "disabled" : ""}>${batchButtonText}</button>` : ""}
+        ${queries.length ? `<button type="button" class="mini-icon retrieval-report-btn" data-simple-plan-batch ${batchButtonDisabled ? "disabled" : ""} title="按计划批量检索">${batchButtonText}</button>` : ""}
       </div>
     </div>
     ${state.retrievalBatchMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalBatchMessage)}</p>` : ""}
-    ${queries.length ? renderSimplePlanSourceLimits() : ""}
     ${renderSimplePlanBatchStatus()}
+    ${queries.length ? `<details class="simple-plan-settings">
+      <summary>检索数量设置</summary>
+      ${renderSimplePlanSourceLimits()}
+    </details>` : ""}
     ${queries.length ? `<div class="simple-ai-plan-list">
       ${queries.map((item, index) => `<article>
         <em>${index + 1}</em>
         <div>
-          <strong>${escapeHtml(item.query || "")}</strong>
-          ${item.intent ? `<small>意图：${escapeHtml(item.intent)}</small>` : ""}
-          <span>${escapeHtml(item.model_reason || item.reason || "用于覆盖不同数据源表达方式")}</span>
-          ${(item.sources || []).length ? `<small>推荐源：${escapeHtml((item.sources || []).join(" / "))}</small>` : ""}
+          <strong title="${escapeHtml(item.query || "")}">${escapeHtml(item.query || "")}</strong>
+          <div class="simple-ai-plan-meta">
+            ${item.intent ? `<small>意图：${escapeHtml(item.intent)}</small>` : ""}
+            ${(item.sources || []).length ? `<small>源：${escapeHtml((item.sources || []).join(" / "))}</small>` : ""}
+          </div>
+          <span title="${escapeHtml(item.model_reason || item.reason || "")}">${escapeHtml(item.model_reason || item.reason || "覆盖不同数据源表达方式")}</span>
         </div>
       </article>`).join("")}
-    </div>` : `<div class="simple-result-placeholder">先在上方直接输入关键词，再点“生成计划”。计划检索适合扩大覆盖面，结果也会显示到下方候选区。</div>`}
+    </div>` : `<div class="simple-result-placeholder">输入左侧主题后，先拆解检索词；确认 query 和源后按计划批量检索。</div>`}
   </section>`;
 }
 
 function renderSimpleRetrievalMain() {
   const selectedCount = selectedRetrievalCandidates().length;
   const candidateCount = state.retrievalCandidates.length;
-  const aiRecommendedCount = state.retrievalCandidates.filter((candidate) => {
-    return String(candidate.ai_evaluation?.decision || "").toLowerCase() === "recommend";
-  }).length;
+  const aiRecommendedCount = state.retrievalCandidates.filter(retrievalCandidateIsAiRecommended).length;
+  const aiSummarySource = String(state.retrievalAiEvaluationSummary?.score_source || "");
+  const recommendationLabel = "AI 推荐";
   const candidateHtml = renderRetrievalCandidates();
+  const selectedSourceNames = uniqueRetrievalSources([...state.retrievalSources]);
+  const selectedSourcePreview = selectedSourceNames.slice(0, 4).map(retrievalSourceLabel).join(" / ");
+  const selectedSourceSummary = selectedSourceNames.length
+    ? `已选 ${selectedSourceNames.length} 个源${selectedSourcePreview ? `：${selectedSourcePreview}${selectedSourceNames.length > 4 ? " ..." : ""}` : ""}`
+    : "未选择数据源";
+  const aiConfigured = state.retrievalModelStatus?.configured === true;
+  const aiPlanButtonText = state.retrievalQueryPlanBusy ? "拆解中..." : "AI 深度检索";
+  const hasAiScoring = ["ai_model", "mixed_ai_rules"].includes(aiSummarySource);
+  const aiScoreButtonText = state.retrievalAiEvaluationBusy
+    ? "AI 排序中..."
+    : hasAiScoring ? "重新 AI 排序" : "AI 推荐排序";
   return `
-    <section class="simple-retrieval-guide" aria-label="三步使用流程">
-      <div>
-        <strong>1. 搜索</strong>
-        <span>输入关键词，默认源先跑一遍。</span>
-      </div>
-      <div>
-        <strong>2. 勾选</strong>
-        <span>看候选标题和来源，选需要入库的条目。</span>
-      </div>
-      <div>
-        <strong>3. 入库/报告</strong>
-        <span>导入所选，必要时下载汇总报告。</span>
-      </div>
-    </section>
-
-    <form class="add-item-form simple-search-form retrieval-search-form" data-retrieval-search-form>
-      <div class="simple-section-title">
-        <strong>直接检索</strong>
-        <span>只用当前关键词跑一次，速度最快；结果马上显示到下方候选区。</span>
-      </div>
-      <label class="simple-query-box">
-        <span>要找什么资料？</span>
-        <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 AI for Science graph neural network">
-      </label>
-
-      <div class="simple-source-head">
-        <div>
-          <strong>选择异构数据源</strong>
-          <span>按资料对象分类：论文、预印本、领域库、数据/代码、本地系统。</span>
+    <section class="simple-retrieval-workbench">
+      <form class="add-item-form simple-search-form simple-search-composer retrieval-search-form" data-retrieval-search-form>
+        <section class="simple-retrieval-guide" aria-label="三步使用流程" hidden></section>
+        <div class="simple-composer-head">
+          <div>
+            <strong>检索</strong>
+          </div>
+          <span class="simple-composer-status">${escapeHtml(aiConfigured ? "AI 已配置" : "模型未配置")}</span>
         </div>
-        <button type="button" class="mini-icon" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
-      </div>
-      <div class="simple-source-categories">
-        ${SIMPLE_RETRIEVAL_SOURCE_CATEGORIES.map(renderSimpleRetrievalSourceCategory).join("")}
-      </div>
+        <label class="simple-query-box simple-composer-query">
+          <span>主题 / 关键词</span>
+          <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 speculative decoding LLM inference acceleration">
+        </label>
+        <div class="simple-composer-actions">
+          <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "快速检索"}</button>
+          <button type="button" class="form-action-btn secondary-action" data-simple-ai-query-plan ${state.retrievalQueryPlanBusy ? "disabled" : ""}>${aiPlanButtonText}</button>
+          <span>${escapeHtml(selectedSourceSummary)}</span>
+        </div>
+        ${renderSimpleAiQueryPlan()}
+        <details class="simple-source-drawer">
+          <summary>
+            <strong>数据源</strong>
+            <span>${escapeHtml(selectedSourceSummary)}</span>
+          </summary>
+          <div class="simple-source-head">
+            <div>
+              <strong>选择检索源</strong>
+            </div>
+            <button type="button" class="mini-icon" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
+          </div>
+          <div class="simple-source-categories">
+            ${SIMPLE_RETRIEVAL_SOURCE_CATEGORIES.map(renderSimpleRetrievalSourceCategory).join("")}
+          </div>
+          ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
+        </details>
+      </form>
 
-      ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
-      <div class="simple-search-actions">
-        <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "开始检索"}</button>
-        <span>直接检索不会入库，只把候选放到下面。</span>
-      </div>
-    </form>
-
-    ${renderSimpleAiQueryPlan()}
-
-    <section class="simple-results-panel" aria-label="检索结果">
-      <div class="simple-results-head">
-        <div>
+      <section class="simple-results-panel simple-candidate-board" aria-label="检索结果">
+        <div class="simple-results-head">
+          <div>
           <strong>候选结果</strong>
           <span>勾选后点击导入所选。</span>
+          </div>
+          ${candidateCount ? `<div class="simple-result-tools">
+            <button type="button" class="mini-icon retrieval-report-btn" data-score-retrieval-candidates-ai ${state.retrievalAiEvaluationBusy || !aiConfigured ? "disabled" : ""}>${aiScoreButtonText}</button>
+            ${state.retrievalAiEvaluationBusy ? `<button type="button" class="mini-icon retrieval-report-btn danger" data-stop-retrieval-ai-scoring>停止评分</button>` : ""}
+            <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="ai" ${aiRecommendedCount ? "" : "disabled"}>全选${recommendationLabel}${aiRecommendedCount ? ` (${aiRecommendedCount})` : ""}</button>
+            <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="all">全选候选</button>
+            <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="none">清空选择</button>
+          </div>` : ""}
         </div>
-        ${candidateCount ? `<div class="simple-result-tools">
-          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="ai" ${aiRecommendedCount ? "" : "disabled"}>全选 AI 推荐${aiRecommendedCount ? ` (${aiRecommendedCount})` : ""}</button>
-          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="all">全选候选</button>
-          <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="none">清空选择</button>
-        </div>` : ""}
-      </div>
-      ${renderRetrievalStats()}
-      ${renderRetrievalAiSummary()}
-      ${candidateHtml || `<div class="simple-result-placeholder">直接检索或计划检索完成后，这里会显示候选条目和 AI 推荐。</div>`}
-      <div class="retrieval-actions simple-import-actions">
-        <span>已选择 ${selectedCount} 条</span>
-        <button type="button" class="form-action-btn" data-import-retrieval-selected ${state.addItemBusy || !selectedCount ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入所选"}</button>
-      </div>
-    </section>
+        ${renderRetrievalStats()}
+        ${renderRetrievalAiSummary()}
+        ${candidateHtml || `<div class="simple-result-placeholder">直接检索或计划检索完成后，这里会显示候选条目和推荐判断。</div>`}
+        <div class="retrieval-actions simple-import-actions">
+          <span>已选择 ${selectedCount} 条</span>
+          <button type="button" class="form-action-btn" data-import-retrieval-selected ${state.addItemBusy || !selectedCount ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入所选"}</button>
+        </div>
+      </section>
 
-    <section class="simple-report-bar" aria-label="常用报告">
-      <div>
-        <strong>常用检查和报告</strong>
-        <span>报告基于最近检索记录；更完整的记录在高级区。</span>
-      </div>
-      <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-runs title="刷新最近检索">刷新记录</button>
-      <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="markdown" title="下载阶段 Markdown 汇总">下载汇总</button>
-      <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-readiness title="检查内部源是否可交接">${state.retrievalReadinessBusy ? "检查中..." : "检查数据源"}</button>
+      <details class="simple-report-drawer">
+        <summary>报告和检查</summary>
+        <section class="simple-report-bar" aria-label="常用报告">
+          <div>
+            <strong>常用检查和报告</strong>
+            <span>报告基于最近检索记录；更完整的记录在高级区。</span>
+          </div>
+          <button type="button" class="mini-icon retrieval-report-btn" data-refresh-retrieval-runs title="刷新最近检索">刷新记录</button>
+          <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-summary data-report-format="markdown" title="下载阶段 Markdown 汇总">下载汇总</button>
+          <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-readiness title="检查内部源是否可交接">${state.retrievalReadinessBusy ? "检查中..." : "检查数据源"}</button>
+        </section>
+      </details>
     </section>
   `;
 }
@@ -2884,20 +3035,13 @@ function renderAddItemModal() {
 function renderRetrievalPage() {
   const host = document.querySelector("[data-retrieval-page-panel]");
   if (!host) return;
-  const editable = state.library?.editable !== false;
   host.innerHTML = `
-    <div class="feature-panel-head retrieval-page-head">
-      <div>
-        <h2>多源检索</h2>
-        <p>${editable ? "先搜索、再勾选、最后导入。新数据源接入和批量验证放在下面高级区。" : "当前是只读源库，可以检索和看报告；导入条目请先创建本地副本。"}</p>
-      </div>
-    </div>
     ${renderSimpleRetrievalMain()}
     ${state.addItemMessage ? `<p class="import-message" data-import-message>${escapeHtml(state.addItemMessage)}</p>` : ""}
     ${renderAddItemResults()}
     <details class="retrieval-advanced">
       <summary>
-        <span>高级：配置数据源 / 批量验证 / 汇报交接</span>
+        <span>高级设置</span>
         <em>先看源配置说明，再按 Local、HTTP、SQLite 或 Manifest 填对应配置。</em>
       </summary>
       <div class="retrieval-advanced-body">
@@ -3053,6 +3197,8 @@ function bindRetrievalPageEvents(host) {
       draftRetrievalBatchQueries({ limit: 5 });
     }
     else if (button.matches("[data-simple-plan-batch]")) submitSimpleRetrievalPlanBatch();
+    else if (button.matches("[data-score-retrieval-candidates-ai]")) scoreRetrievalCandidatesWithAi();
+    else if (button.matches("[data-stop-retrieval-ai-scoring]")) stopRetrievalAiScoring();
     else if (button.matches("[data-simple-batch-mode]")) {
       state.retrievalBatchMode = button.dataset.simpleBatchMode === "full" ? "full" : "quick";
       state.retrievalSimpleSourceLimits = {};
@@ -3067,6 +3213,7 @@ function bindRetrievalPageEvents(host) {
     else if (button.matches("[data-select-retrieval-candidates]")) setRetrievalCandidateSelection(button.dataset.selectRetrievalCandidates);
     else if (button.matches("[data-import-retrieval-selected]")) submitRetrievalImport();
     else if (button.matches("[data-refresh-retrieval-runs]")) loadRetrievalRuns();
+    else if (button.matches("[data-load-retrieval-run-candidates]")) loadRetrievalRunCandidates(button.dataset.loadRetrievalRunCandidates);
     else if (button.matches("[data-check-retrieval-sources]")) loadRetrievalSources({ check: true });
     else if (button.matches("[data-setup-retrieval-rehearsal]")) setupRetrievalRehearsalKit();
     else if (button.matches("[data-validate-retrieval-rehearsal]")) validateRetrievalRehearsalRun();
@@ -3218,10 +3365,54 @@ async function submitRetrievalSearch(event) {
   }
   try {
     state.addItemBusy = true;
-    state.addItemMessage = "";
+    state.addItemMessage = "快速检索已提交后台，切换页面也会继续运行。";
     state.addItemResults = [];
+    state.retrievalSearchJobId = "";
+    state.retrievalAiScoringJobId = "";
+    state.retrievalAiEvaluationBusy = false;
+    state.retrievalAiEvaluationStopRequested = false;
+    state.retrievalQueryPlanJobId = "";
+    state.retrievalQueryPlanBusy = false;
+    state.retrievalQueryPlan = null;
+    state.retrievalBatchQueries = "";
+    if (retrievalAiScoringPollTimer) {
+      clearTimeout(retrievalAiScoringPollTimer);
+      retrievalAiScoringPollTimer = null;
+    }
+    if (retrievalQueryPlanPollTimer) {
+      clearTimeout(retrievalQueryPlanPollTimer);
+      retrievalQueryPlanPollTimer = null;
+    }
+    if (retrievalSearchPollTimer) {
+      clearTimeout(retrievalSearchPollTimer);
+      retrievalSearchPollTimer = null;
+    }
     renderAddItemModal();
-    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/search`, { query, sources, limit: 10, use_ai_evaluation: true });
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/search/jobs`, { query, sources, limit: 10, use_ai_evaluation: false });
+    applyRetrievalSearchJob(result.job || null);
+    scheduleRetrievalSearchPoll(state.retrievalSearchJobId);
+    renderAddItemModal();
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.retrievalCandidates = [];
+    state.retrievalSelectedKeys = new Set();
+    state.retrievalStats = null;
+    state.retrievalAiEvaluationSummary = null;
+    state.retrievalRunId = "";
+  } finally {
+    if (!state.retrievalSearchJobId) state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalSearchJob(job) {
+  if (!job) return false;
+  const jobQuery = String(job.query || "");
+  if (jobQuery && state.retrievalQuery && jobQuery !== state.retrievalQuery && state.retrievalCandidates.length) return false;
+  state.retrievalSearchJobId = String(job.job_id || state.retrievalSearchJobId || "");
+  state.addItemBusy = retrievalBackgroundJobIsActive(job);
+  const result = job.result && typeof job.result === "object" ? job.result : null;
+  if (result) {
     state.retrievalCandidates = normalizeRetrievalCandidates(result.candidates || []);
     state.retrievalSelectedKeys = new Set(
       state.retrievalCandidates
@@ -3232,22 +3423,236 @@ async function submitRetrievalSearch(event) {
     state.retrievalStats = result.source_stats || {};
     state.retrievalAiEvaluationSummary = result.ai_evaluation_summary || null;
     state.retrievalRunId = result.run_id || "";
-    const autoSelected = Number(state.retrievalAiEvaluationSummary?.auto_selected_count || state.retrievalSelectedKeys.size || 0);
-    const aiStatus = state.retrievalAiEvaluationSummary?.status
-      ? `AI 判断：${state.retrievalAiEvaluationSummary.status}${autoSelected ? `，默认勾选 ${autoSelected} 条` : ""}`
-      : "";
-    state.addItemMessage = `检索到 ${state.retrievalCandidates.length} 条候选。${aiStatus ? ` ${aiStatus}。` : ""}`;
-    await loadRetrievalRuns({ silent: true });
-    await loadRetrievalSummary({ silent: true });
-  } catch (error) {
-    state.addItemMessage = error.message;
-    state.retrievalCandidates = [];
-    state.retrievalSelectedKeys = new Set();
-    state.retrievalStats = null;
-    state.retrievalAiEvaluationSummary = null;
-    state.retrievalRunId = "";
-  } finally {
+  }
+  const status = String(job.status || "");
+  const candidateCount = Number(job.candidate_count || state.retrievalCandidates.length || 0);
+  if (status === "queued") {
+    state.addItemMessage = "快速检索已进入后台队列。";
+  } else if (status === "running") {
+    state.addItemMessage = "后台快速检索中，切换页面也会继续运行。";
+  } else if (status === "failed") {
     state.addItemBusy = false;
+    state.addItemMessage = `快速检索失败：${job.error || "后台任务异常"}`;
+  } else if (status === "canceled") {
+    state.addItemBusy = false;
+    state.addItemMessage = "快速检索已取消。";
+  } else if (status === "completed") {
+    state.addItemBusy = false;
+    state.addItemMessage = `检索到 ${candidateCount} 条候选。需要更省事的排序时，可点击“AI 推荐排序”。`;
+    loadRetrievalRuns({ silent: true });
+    loadRetrievalSummary({ silent: true });
+  }
+  return true;
+}
+
+async function loadRetrievalSearchJob(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  if (!state.retrievalSearchJobId || cleanJobId !== state.retrievalSearchJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/search/jobs/${encodeURIComponent(cleanJobId)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载快速检索任务失败。");
+    const applied = applyRetrievalSearchJob(data.job || null);
+    if (!applied) {
+      if (retrievalSearchPollTimer) clearTimeout(retrievalSearchPollTimer);
+      retrievalSearchPollTimer = null;
+      return;
+    }
+    if (retrievalBackgroundJobIsActive(data.job)) {
+      scheduleRetrievalSearchPoll(cleanJobId);
+    } else if (retrievalSearchPollTimer) {
+      clearTimeout(retrievalSearchPollTimer);
+      retrievalSearchPollTimer = null;
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+    state.addItemBusy = false;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalSearchPoll(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (retrievalSearchPollTimer) clearTimeout(retrievalSearchPollTimer);
+  retrievalSearchPollTimer = null;
+  if (!cleanJobId) return;
+  retrievalSearchPollTimer = setTimeout(() => {
+    loadRetrievalSearchJob(cleanJobId, { silent: true });
+  }, 1200);
+}
+
+async function loadLatestRetrievalSearchJob(options = {}) {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/search/jobs/latest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载最近快速检索任务失败。");
+    const job = data.job || null;
+    if (!job) return;
+    const shouldRestore = retrievalBackgroundJobIsActive(job) || !state.retrievalCandidates.length || String(job.query || "") === String(state.retrievalQuery || "");
+    const applied = shouldRestore ? applyRetrievalSearchJob(job) : false;
+    if (applied && retrievalBackgroundJobIsActive(job)) scheduleRetrievalSearchPoll(job.job_id);
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function scoreRetrievalCandidatesWithAi() {
+  const query = String(document.querySelector("[data-retrieval-query-input]")?.value || state.retrievalQuery || "").trim();
+  state.retrievalQuery = query;
+  if (!query) {
+    state.addItemMessage = "请输入检索词后再进行 AI 推荐排序。";
+    renderAddItemModal();
+    return;
+  }
+  if (!state.retrievalCandidates.length) {
+    state.addItemMessage = "没有可评分的候选。请先检索。";
+    renderAddItemModal();
+    return;
+  }
+  if (state.retrievalModelStatus?.configured !== true) {
+    state.addItemMessage = "模型未配置，无法进行 AI 推荐排序。";
+    renderAddItemModal();
+    return;
+  }
+  try {
+    state.retrievalAiEvaluationBusy = true;
+    state.retrievalAiEvaluationStopRequested = false;
+    state.addItemMessage = `AI 推荐排序已提交后台：按规则置信度从高到低逐条评分，共 ${state.retrievalCandidates.length} 条。`;
+    state.retrievalAiEvaluationSummary = buildRetrievalAiProgressSummary("evaluating");
+    sortRetrievalCandidatesForAiProgress();
+    renderAddItemModal();
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/ai-scoring-jobs`, {
+      query,
+      candidates: state.retrievalCandidates,
+    });
+    applyRetrievalAiScoringJob(result.job || null);
+    scheduleRetrievalAiScoringPoll(state.retrievalAiScoringJobId);
+    renderAddItemModal();
+  } catch (error) {
+    state.addItemMessage = `AI 推荐排序失败：${error.message}`;
+    state.retrievalAiEvaluationBusy = false;
+    state.retrievalAiEvaluationStopRequested = false;
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalAiScoringJob(job) {
+  if (!job) return false;
+  const jobQuery = String(job.query || "");
+  if (jobQuery && state.retrievalQuery && jobQuery !== state.retrievalQuery && state.retrievalCandidates.length) return false;
+  state.retrievalAiScoringJobId = String(job.job_id || state.retrievalAiScoringJobId || "");
+  const candidates = Array.isArray(job.candidates) ? normalizeRetrievalCandidates(job.candidates) : [];
+  if (candidates.length) {
+    state.retrievalCandidates = candidates;
+    const candidateKeys = new Set(candidates.map((candidate) => candidate.client_key).filter(Boolean));
+    const selectedKeys = new Set([...state.retrievalSelectedKeys].filter((key) => candidateKeys.has(key)));
+    candidates
+      .filter((candidate) => candidate.ai_evaluation?.auto_select === true && retrievalCandidateHasAiModelEvaluation(candidate))
+      .map((candidate) => candidate.client_key)
+      .filter(Boolean)
+      .forEach((key) => selectedKeys.add(key));
+    state.retrievalSelectedKeys = selectedKeys;
+  }
+  state.retrievalAiEvaluationSummary = job.summary || buildRetrievalAiProgressSummary(retrievalBackgroundJobIsTerminal(job) ? "partial" : "evaluating", job.error || "");
+  state.retrievalAiEvaluationBusy = retrievalBackgroundJobIsActive(job);
+  state.retrievalAiEvaluationStopRequested = String(job.status || "") === "canceling";
+  const total = Number(job.total_count || candidates.length || 0);
+  const completed = Number(job.completed_count || state.retrievalAiEvaluationSummary?.processed_candidate_count || 0);
+  const aiCompleted = Number(job.ai_completed_count || state.retrievalAiEvaluationSummary?.ai_evaluated_candidate_count || 0);
+  const failed = Number(job.failed_count || state.retrievalAiEvaluationSummary?.failed_batch_count || 0);
+  const autoSelected = Number(state.retrievalAiEvaluationSummary?.auto_selected_count || 0);
+  const status = String(job.status || "");
+  if (status === "queued") {
+    state.addItemMessage = `AI 推荐排序已进入后台队列，共 ${total} 条。`;
+  } else if (status === "running") {
+    state.addItemMessage = `后台 AI 推荐排序中：已处理 ${completed}/${total} 条，AI 已评分 ${aiCompleted} 条${failed ? `，失败 ${failed} 条` : ""}。`;
+  } else if (status === "canceling") {
+    state.addItemMessage = `正在停止 AI 推荐排序：已处理 ${completed}/${total} 条。`;
+  } else if (status === "canceled") {
+    state.addItemMessage = `AI 推荐排序已停止：已处理 ${completed}/${total} 条，默认勾选 ${autoSelected} 条真实 AI 推荐。`;
+  } else if (status === "failed") {
+    state.addItemMessage = `AI 推荐排序失败：${job.error || "后台任务异常"}`;
+  } else if (status === "partial") {
+    state.addItemMessage = `AI 推荐排序部分完成：已处理 ${completed}/${total} 条，AI 已评分 ${aiCompleted} 条，默认勾选 ${autoSelected} 条真实 AI 推荐。`;
+  } else if (status === "completed") {
+    state.addItemMessage = `AI 推荐排序完成：已逐条评分 ${aiCompleted} 条，默认勾选 ${autoSelected} 条真实 AI 推荐。`;
+  }
+  sortRetrievalCandidatesForAiProgress();
+  return true;
+}
+
+async function loadRetrievalAiScoringJob(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  if (!state.retrievalAiScoringJobId || cleanJobId !== state.retrievalAiScoringJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/ai-scoring-jobs/${encodeURIComponent(cleanJobId)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 AI 推荐排序任务失败。");
+    const applied = applyRetrievalAiScoringJob(data.job || null);
+    if (!applied) {
+      if (retrievalAiScoringPollTimer) clearTimeout(retrievalAiScoringPollTimer);
+      retrievalAiScoringPollTimer = null;
+      return;
+    }
+    if (retrievalBackgroundJobIsActive(data.job)) {
+      scheduleRetrievalAiScoringPoll(cleanJobId);
+    } else if (retrievalAiScoringPollTimer) {
+      clearTimeout(retrievalAiScoringPollTimer);
+      retrievalAiScoringPollTimer = null;
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+    state.retrievalAiEvaluationBusy = false;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalAiScoringPoll(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (retrievalAiScoringPollTimer) clearTimeout(retrievalAiScoringPollTimer);
+  retrievalAiScoringPollTimer = null;
+  if (!cleanJobId) return;
+  retrievalAiScoringPollTimer = setTimeout(() => {
+    loadRetrievalAiScoringJob(cleanJobId, { silent: true });
+  }, 1500);
+}
+
+async function loadLatestRetrievalAiScoringJob(options = {}) {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/ai-scoring-jobs/latest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载最近 AI 推荐排序任务失败。");
+    const job = data.job || null;
+    if (!job) return;
+    const shouldRestore = retrievalBackgroundJobIsActive(job) || !state.retrievalCandidates.length || String(job.query || "") === String(state.retrievalQuery || "");
+    const applied = shouldRestore ? applyRetrievalAiScoringJob(job) : false;
+    if (applied && retrievalBackgroundJobIsActive(job)) scheduleRetrievalAiScoringPoll(job.job_id);
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function stopRetrievalAiScoring() {
+  if (!state.retrievalAiEvaluationBusy || !state.retrievalAiScoringJobId) return;
+  state.retrievalAiEvaluationStopRequested = true;
+  state.addItemMessage = "正在停止 AI 推荐排序...";
+  renderAddItemModal();
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/ai-scoring-jobs/${encodeURIComponent(state.retrievalAiScoringJobId)}/cancel`, {});
+    applyRetrievalAiScoringJob(result.job || null);
+    scheduleRetrievalAiScoringPoll(state.retrievalAiScoringJobId);
+  } catch (error) {
+    state.addItemMessage = `停止 AI 推荐排序失败：${error.message}`;
     renderAddItemModal();
   }
 }
@@ -3343,21 +3748,94 @@ async function draftRetrievalBatchQueries(options = {}) {
     state.retrievalBatchMessage = "";
     state.simplePlanBatchJobId = "";
     renderAddItemModal();
-    const params = new URLSearchParams({ seed_query: seedQuery, sample_size: String(sampleSize), limit: String(queryLimit) });
-    currentRetrievalSourceSelection().forEach((source) => params.append("sources", source));
-    if (state.retrievalQueryPlanUseAi && state.retrievalModelStatus?.configured === true) params.set("use_ai", "1");
-    const response = await fetch(`/api/library/${state.libraryId}/retrieval/query-plan?${params.toString()}`);
-    const data = await parseJSONResponse(response);
-    if (!data.ok) throw new Error(data.error || "Failed to draft batch queries.");
-    const plan = data.plan || {};
-    state.retrievalQueryPlan = plan;
-    state.retrievalBatchQueries = String(plan.query_text || "").trim();
-    const queryCount = Number(plan.query_count || 0);
-    state.retrievalBatchMessage = `${plan.message || "Query plan drafted."} ${queryCount} queries ready to review.`;
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/query-plan/jobs`, {
+      seed_query: seedQuery,
+      sample_size: sampleSize,
+      limit: queryLimit,
+      sources: currentRetrievalSourceSelection(),
+      use_ai: state.retrievalQueryPlanUseAi && state.retrievalModelStatus?.configured === true,
+    });
+    applyRetrievalQueryPlanJob(result.job || null);
+    scheduleRetrievalQueryPlanPoll(state.retrievalQueryPlanJobId);
+    renderAddItemModal();
   } catch (error) {
     state.retrievalBatchMessage = error.message;
-  } finally {
     state.retrievalQueryPlanBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalQueryPlanJob(job) {
+  if (!job) return;
+  state.retrievalQueryPlanJobId = String(job.job_id || state.retrievalQueryPlanJobId || "");
+  state.retrievalQueryPlanBusy = retrievalBackgroundJobIsActive(job);
+  const status = String(job.status || "");
+  if (job.plan && typeof job.plan === "object") {
+    const plan = job.plan || {};
+    state.retrievalQueryPlan = plan;
+    state.retrievalBatchQueries = String(plan.query_text || "").trim();
+  }
+  const queryCount = Number(job.query_count || state.retrievalQueryPlan?.query_count || 0);
+  if (status === "queued") {
+    state.retrievalBatchMessage = "AI 检索计划已进入后台队列。";
+  } else if (status === "running") {
+    state.retrievalBatchMessage = "AI 正在后台拆解检索词，切换页面也会继续运行。";
+  } else if (status === "failed") {
+    state.retrievalBatchMessage = `AI 检索计划生成失败：${job.error || "后台任务异常"}`;
+  } else if (status === "completed") {
+    state.retrievalBatchMessage = `${job.message || state.retrievalQueryPlan?.message || "AI 检索计划已生成。"} ${queryCount} 条检索词可确认。`;
+  } else if (status === "canceled") {
+    state.retrievalBatchMessage = "AI 检索计划已取消。";
+  }
+}
+
+async function loadRetrievalQueryPlanJob(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  if (!state.retrievalQueryPlanJobId || cleanJobId !== state.retrievalQueryPlanJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/query-plan/jobs/${encodeURIComponent(cleanJobId)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载 AI 检索计划任务失败。");
+    applyRetrievalQueryPlanJob(data.job || null);
+    if (retrievalBackgroundJobIsActive(data.job)) {
+      scheduleRetrievalQueryPlanPoll(cleanJobId);
+    } else if (retrievalQueryPlanPollTimer) {
+      clearTimeout(retrievalQueryPlanPollTimer);
+      retrievalQueryPlanPollTimer = null;
+    }
+  } catch (error) {
+    if (!options.silent) state.retrievalBatchMessage = error.message;
+    state.retrievalQueryPlanBusy = false;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalQueryPlanPoll(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (retrievalQueryPlanPollTimer) clearTimeout(retrievalQueryPlanPollTimer);
+  retrievalQueryPlanPollTimer = null;
+  if (!cleanJobId) return;
+  retrievalQueryPlanPollTimer = setTimeout(() => {
+    loadRetrievalQueryPlanJob(cleanJobId, { silent: true });
+  }, 1200);
+}
+
+async function loadLatestRetrievalQueryPlanJob(options = {}) {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/query-plan/jobs/latest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载最近 AI 检索计划任务失败。");
+    const job = data.job || null;
+    if (!job) return;
+    const sameQuery = String(job.seed_query || "") === String(state.retrievalQuery || "");
+    if (retrievalBackgroundJobIsActive(job) || sameQuery || !state.retrievalQueryPlan) applyRetrievalQueryPlanJob(job);
+    if (retrievalBackgroundJobIsActive(job)) scheduleRetrievalQueryPlanPoll(job.job_id);
+  } catch (error) {
+    if (!options.silent) state.retrievalBatchMessage = error.message;
+  } finally {
     renderAddItemModal();
   }
 }
@@ -3428,7 +3906,7 @@ async function loadSimplePlanBatchCandidates(jobId, options = {}) {
     state.simplePlanBatchCandidatesBusy = true;
     if (!silent) state.retrievalBatchMessage = "正在加载计划检索候选和 AI 推荐...";
     renderAddItemModal();
-    const params = new URLSearchParams({ limit: "120", use_ai_evaluation: "1" });
+    const params = new URLSearchParams({ limit: "120", use_ai_evaluation: "0" });
     const response = await fetch(`/api/library/${state.libraryId}/retrieval/batches/${encodeURIComponent(cleanJobId)}/candidates?${params.toString()}`);
     const data = await parseJSONResponse(response);
     if (!data.ok) throw new Error(data.error || "加载计划检索候选失败。");
@@ -3446,7 +3924,7 @@ async function loadSimplePlanBatchCandidates(jobId, options = {}) {
     const aiRecommended = state.retrievalCandidates.filter((candidate) => {
       return String(candidate.ai_evaluation?.decision || "").toLowerCase() === "recommend";
     }).length;
-    state.retrievalBatchMessage = `已显示计划检索结果：${state.retrievalCandidates.length} 条候选，AI 推荐 ${aiRecommended} 条，已自动勾选 ${state.retrievalSelectedKeys.size} 条。`;
+    state.retrievalBatchMessage = `已显示计划检索结果：${state.retrievalCandidates.length} 条候选，推荐 ${aiRecommended} 条；需要更省事的排序时，可点击“AI 推荐排序”。`;
   } catch (error) {
     state.retrievalBatchMessage = error.message;
   } finally {
@@ -3736,6 +4214,34 @@ async function loadRetrievalRuns(options = {}) {
     state.retrievalRunsMessage = error.message;
   } finally {
     state.retrievalRunsBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function loadRetrievalRunCandidates(runId, options = {}) {
+  const cleanRunId = String(runId || "").trim();
+  if (!state.libraryId || !cleanRunId) return;
+  const silent = Boolean(options.silent);
+  try {
+    if (!silent) state.addItemMessage = "正在恢复检索结果...";
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/runs/${encodeURIComponent(cleanRunId)}/report?format=json`);
+    const report = await parseJSONResponse(response);
+    if (!response.ok) throw new Error(report.error || "恢复检索结果失败");
+    const run = report.run || {};
+    const candidates = (report.candidates || [])
+      .map((item) => (item && typeof item.payload === "object" && item.payload ? item.payload : item))
+      .filter((item) => item && typeof item === "object");
+    state.retrievalRunId = String(run.run_id || cleanRunId);
+    state.retrievalQuery = String(run.query || state.retrievalQuery || "");
+    state.retrievalStats = run.source_stats || null;
+    state.retrievalCandidates = normalizeRetrievalCandidates(candidates);
+    state.retrievalSelectedKeys = new Set();
+    state.retrievalAiEvaluationSummary = run.ai_evaluation_summary || null;
+    if (!silent) state.addItemMessage = `已恢复检索结果：${state.retrievalCandidates.length} 条候选。`;
+  } catch (error) {
+    if (!silent) state.addItemMessage = error.message;
+  } finally {
     renderAddItemModal();
   }
 }
@@ -7181,6 +7687,10 @@ async function loadState() {
 
 async function loadRetrievalWorkspaceData() {
   await loadRetrievalRuns({ silent: true });
+  if (!state.retrievalCandidates.length && state.retrievalRuns[0]?.run_id) {
+    await loadRetrievalRunCandidates(state.retrievalRuns[0].run_id, { silent: true });
+  }
+  await loadLatestRetrievalSearchJob({ silent: true });
   await loadRetrievalSummary({ silent: true });
   await loadRetrievalSources({ silent: true });
   await loadRetrievalModelStatus({ silent: true });
@@ -7192,6 +7702,8 @@ async function loadRetrievalWorkspaceData() {
   await loadRetrievalManifestTemplates({ silent: true });
   await loadRetrievalManifestConfig({ silent: true });
   await loadRetrievalBatchJobs({ silent: true });
+  await loadLatestRetrievalQueryPlanJob({ silent: true });
+  await loadLatestRetrievalAiScoringJob({ silent: true });
 }
 
 function setupRetrievalPage() {

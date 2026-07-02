@@ -386,6 +386,7 @@ def ai_pixel_chat_completion(
     post_json: JsonPoster = _http_post_json,
     temperature: float = 0.0,
     max_tokens: int = 900,
+    timeout_seconds: int | None = None,
 ) -> Any:
     api_key = ai_pixel_api_key()
     if not api_key:
@@ -400,7 +401,7 @@ def ai_pixel_chat_completion(
         ai_pixel_chat_url(),
         {"Authorization": f"Bearer {api_key}"},
         payload,
-        ai_pixel_timeout_seconds(),
+        timeout_seconds or ai_pixel_timeout_seconds(),
     )
 
 
@@ -440,8 +441,10 @@ def ai_pixel_chat_json(
     messages: list[dict[str, str]],
     *,
     post_json: JsonPoster = _http_post_json,
+    max_tokens: int = 900,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    response = ai_pixel_chat_completion(messages, post_json=post_json)
+    response = ai_pixel_chat_completion(messages, post_json=post_json, max_tokens=max_tokens, timeout_seconds=timeout_seconds)
     if isinstance(response, dict) and "field_map" in response:
         return response
     return json_object_from_text(chat_completion_content(response))

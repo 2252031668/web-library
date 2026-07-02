@@ -17,14 +17,13 @@
   </aside>
   {% endif %}
   <main class="feature-shell">
-    <header class="feature-hero">
-      <div>
-        <p class="eyebrow">Retrieval Workspace</p>
-        <h1>多源异构数据检索</h1>
+    <header class="topbar feature-topbar">
+      <div class="topbar-meta">
+        <h1>多源检索</h1>
         {% if library %}
-        <p>当前文库：{{ library.name }}。先搜，再勾选，再导入；复杂配置都放在高级区。</p>
+        <p>{{ library.name }}</p>
         {% else %}
-        <p>请先进入一个文库，再打开它的多源检索功能页。</p>
+        <p>选择文库</p>
         {% endif %}
       </div>
       <nav class="feature-nav-actions" aria-label="页面入口">
@@ -39,43 +38,8 @@
     </header>
 
     {% if library %}
-    <section class="feature-strip" aria-label="推荐流程">
-      <div>
-        <strong>1. 输入关键词</strong>
-        <span>不确定数据源时，先保留默认勾选。</span>
-      </div>
-      <div>
-        <strong>2. 选择候选</strong>
-        <span>看标题、来源和标识符，勾选要入库的条目。</span>
-      </div>
-      <div>
-        <strong>3. 导入和汇报</strong>
-        <span>导入所选；需要交接时再下载 Summary、ONB 或 ONB ZIP。</span>
-      </div>
-    </section>
-
     <section class="feature-panel retrieval-workbench" data-retrieval-page-panel>
       <p class="empty-state">正在加载多源检索功能...</p>
-    </section>
-
-    <section class="feature-two-column">
-      <div class="feature-panel">
-        <h2>平时只用上面三步</h2>
-        <ul class="feature-list">
-          <li><strong>检索：</strong>输入 query，点击开始检索。</li>
-          <li><strong>入库：</strong>勾选候选，点击导入所选。</li>
-          <li><strong>报告：</strong>点击下载汇总，保存检索和入库证据。</li>
-        </ul>
-      </div>
-
-      <div class="feature-panel">
-        <h2>什么时候打开高级区</h2>
-        <ul class="feature-list">
-          <li><strong>接新源：</strong>用 Source intake、字段映射和 Local / HTTP / SQLite / Manifest 配置。</li>
-          <li><strong>做验收：</strong>跑 READY、Batch，再下载 ONB 和 ONB ZIP。</li>
-          <li><strong>只读库：</strong>可以检索，不能导入；要导入请先创建本地副本。</li>
-        </ul>
-      </div>
     </section>
     {% else %}
     <section class="feature-panel">

@@ -4,6 +4,8 @@
 负责人：cjh  
 最后更新：2026-06-29
 
+公开功能实现说明见：`docs/多源异构检索功能实现说明.md`。
+
 ## 1. 背景与目标
 
 当前项目已经具备 Zotero 本地文库读取、本地副本编辑、标识符导入、引用文本导入、去重和写入 Zotero SQLite 的基础能力。
@@ -83,8 +85,8 @@
 2. 在多源检索页输入关键词后，可点击“AI 生成检索计划”，生成 3-5 条 query、推荐源和理由。
 3. 用户确认后再启动批量检索，真实候选仍来自 Crossref、arXiv、PubMed、GitHub、HuggingFace、Zenodo 等 provider。
 4. 检索结果返回后，模型只基于元数据判断候选是否可用，不发送 raw JSON。
-5. 候选会得到 `recommend / review / reject`、相关性、质量、风险、理由和缺失字段。
-6. 只有模型判 `recommend`、相关性和质量足够、风险不高、关键字段不缺时才默认勾选；最终仍由用户点击“导入所选”。
+5. 候选会得到 `recommend / review / reject`，以及主题相关度、元数据质量、来源证据强度、导入风险、最终推荐置信度、理由和缺失字段。
+6. 只有模型判 `recommend`、最终推荐置信度足够、导入风险不高、关键字段不缺时才默认勾选；最终仍由用户点击“导入所选”。
 
 ## 4. 总体架构
 
@@ -152,9 +154,11 @@ API 输出会额外补充：
 - `existing_matches`：命中的已有条目 key、标题、类型和匹配标识符。
 - `similarity_hint`：与当前文库已有条目的弱相似提示。
 - `weak_similarity_matches`：标题、年份、第一作者等弱相似证据命中的已有条目。
-- `ai_evaluation`：AI 候选可用性判断，包含 `decision`、`relevance_score`、`quality_score`、`risk_level`、`reason`、`missing_fields` 和 `auto_select`。
+- `ai_evaluation`：候选可用性判断。模型可用时使用 `ai_rubric_v1`，包含 `decision`、`topic_relevance_score`、`metadata_quality_score`、`source_evidence_score`、`import_risk_score`、`final_confidence_score`、`risk_level`、`reason`、`missing_fields` 和 `auto_select`；未配置模型或模型失败时使用 `metadata_rules_v1` 兜底，并在 `score_source` 标识为规则评分。
 
 AI 评估请求只发送候选元数据：标题、作者、年份、摘要、来源、DOI/PMID/arXiv/ISBN、`source_count`、`multi_source` 和 URL；不发送 provider 的 `raw` 原始响应。
+
+AI 候选评分的详细实现维护在 `docs/ai-candidate-scoring-implementation.md`。
 
 ### 5.2 数据源诊断
 
