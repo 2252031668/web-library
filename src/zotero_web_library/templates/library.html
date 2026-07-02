@@ -11,6 +11,7 @@
     <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
     <a class="rail-btn" title="多源检索" href="{{ url_for('features_page', library_id=library.library_id) }}">检</a>
     <button class="rail-btn active" title="文库">库</button>
+    <a class="rail-btn" title="知识库" href="{{ url_for('knowledge_page', library_id=library.library_id) }}">知</a>
     <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
   </aside>
@@ -80,8 +81,7 @@
               <button class="bulk-action-btn" type="button" data-bulk-action="download-papers">文献下载</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="query-rank">期刊&会议等级查询</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="export-citation">引用导出</button>
-              <button class="bulk-action-btn" type="button" data-bulk-action="paper-matrix">文献矩阵</button>
-              <button class="bulk-action-btn" type="button" data-bulk-action="knowledge-qa">知识库问答</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="import-knowledge">导入知识库</button>
             </div>
           </div>
         </div>

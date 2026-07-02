@@ -651,12 +651,12 @@ function bulkActionState(action) {
     case "parse-pdfs":
       if (!editable) return { enabled: false, title: localCopyRequired };
       return checkedCount ? { enabled: true, title: "用 MinerU 解析已勾选条目的 PDF" } : { enabled: false, title: checkedRequired };
+    case "import-knowledge":
+      return checkedCount ? { enabled: false, title: pending } : { enabled: false, title: checkedRequired };
     case "export-citation":
       return checkedCount ? { enabled: true, title: "导出已勾选条目引用" } : { enabled: false, title: checkedRequired };
     case "download-papers":
     case "query-rank":
-    case "paper-matrix":
-    case "knowledge-qa":
       return checkedCount ? { enabled: false, title: pending } : { enabled: false, title: checkedRequired };
     default:
       return { enabled: false, title: pending };
@@ -682,9 +682,8 @@ function notifyFeatureInProgress(action) {
     ["parse-pdfs", "PDF 解析"],
     ["download-papers", "文献下载"],
     ["query-rank", "期刊&会议等级查询"],
+    ["import-knowledge", "导入知识库"],
     ["export-citation", "引用导出"],
-    ["paper-matrix", "文献矩阵"],
-    ["knowledge-qa", "知识库问答"],
   ]);
   console.info(`${labels.get(action) || "该功能"}开发中`);
 }

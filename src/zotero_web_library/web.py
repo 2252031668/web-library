@@ -9095,6 +9095,12 @@ def create_app() -> Flask:
         libraries = app_store.list_libraries()
         return render_template("library.html", library=library, libraries=libraries)
 
+    @app.get("/library/<library_id>/knowledge")
+    def knowledge_page(library_id: str):
+        library = library_or_404(library_id)
+        libraries = app_store.list_libraries()
+        return render_template("knowledge.html", library=library, libraries=libraries)
+
     @app.get("/library/<library_id>/reader")
     def reader_page(library_id: str):
         library = library_or_404(library_id)
