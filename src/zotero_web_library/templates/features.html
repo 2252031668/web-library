@@ -3,44 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% if library %}{{ library.name }} - 多源检索{% else %}多源检索{% endif %}</title>
+  <title>{% if library %}{{ library.name }} - 文献检索{% else %}文献检索{% endif %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body class="feature-page"{% if library %} data-retrieval-page data-library-id="{{ library.library_id }}"{% endif %}>
   {% if library %}
   <aside class="rail">
     <a class="rail-logo" href="{{ url_for('index') }}">ZW</a>
-    <a class="rail-btn active" title="多源检索" href="{{ url_for('features_page', library_id=library.library_id) }}">检</a>
+    <a class="rail-btn active" title="文献检索" href="{{ url_for('features_page', library_id=library.library_id) }}">检</a>
     <a class="rail-btn" title="文库" href="{{ url_for('library_page', library_id=library.library_id) }}">库</a>
     <a class="rail-btn" title="知识库" href="{{ url_for('knowledge_page', library_id=library.library_id) }}">知</a>
     <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
   </aside>
   {% endif %}
+
   <main class="feature-shell">
+    {% if library %}
     <header class="topbar feature-topbar">
       <div class="topbar-meta">
-        <h1>多源检索</h1>
-        {% if library %}
+        <h1>文献检索</h1>
         <p>{{ library.name }}</p>
-        {% else %}
-        <p>选择文库</p>
-        {% endif %}
       </div>
       <nav class="feature-nav-actions" aria-label="页面入口">
-        {% if library %}
         <span class="mode-pill {{ 'readonly' if library.mode == 'read_only_connection' else 'copy' }}">{{ "只读源库" if library.mode == "read_only_connection" else "本地副本" }}</span>
-        <span class="mode-pill" data-unsynced>未同步 0</span>
         <a class="nav-action-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">返回文库</a>
         <a class="nav-action-btn" href="{{ url_for('api_config_page', library_id=library.library_id) }}">API 配置</a>
-        {% endif %}
         <a class="nav-action-btn" href="{{ url_for('index') }}">源管理</a>
       </nav>
     </header>
 
-    {% if library %}
     <section class="feature-panel retrieval-workbench" data-retrieval-page-panel>
-      <p class="empty-state">正在加载多源检索功能...</p>
+      <p class="empty-state">正在加载文献检索功能...</p>
     </section>
     {% else %}
     <section class="feature-panel">
@@ -53,7 +47,7 @@
             <strong>{{ item.name }}</strong>
             <span>{{ "本地只读" if item.mode == "read_only_connection" else "副本编辑" }} · {{ item.source_path }}</span>
           </div>
-          <a class="library-enter-btn" href="{{ url_for('features_page', library_id=item.library_id) }}">进入多源检索</a>
+          <a class="library-enter-btn" href="{{ url_for('features_page', library_id=item.library_id) }}">进入文献检索</a>
         </div>
         {% endfor %}
       </div>

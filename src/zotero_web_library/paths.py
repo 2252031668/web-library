@@ -18,3 +18,15 @@ def app_db_path() -> Path:
 
 def libraries_dir() -> Path:
     return app_data_dir() / "libraries"
+
+
+def library_dir(library_id: str) -> Path:
+    return libraries_dir() / str(library_id)
+
+
+def library_workspace_dir(library_id: str) -> Path:
+    return library_dir(library_id) / "workspace"
+
+
+def library_search_runs_dir(library_id: str) -> Path:
+    return library_workspace_dir(library_id) / "search-runs"

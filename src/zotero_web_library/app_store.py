@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import app_db_path, app_data_dir, libraries_dir
+from .paths import app_db_path, app_data_dir, libraries_dir, library_search_runs_dir
 from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .utils import new_key, now_iso
 
@@ -98,6 +98,73 @@ CREATE TABLE IF NOT EXISTS import_provenance (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS search_runs (
+  search_run_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  user_request TEXT NOT NULL DEFAULT '',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  raw_result_path TEXT NOT NULL DEFAULT '',
+  thread_id TEXT NOT NULL DEFAULT '',
+  assistant_message TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  inserted_count INTEGER NOT NULL DEFAULT 0,
+  deduped_count INTEGER NOT NULL DEFAULT 0,
+  updated_count INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS search_chat_messages (
+  message_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  search_run_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  inserted_count INTEGER NOT NULL DEFAULT 0,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS search_run_events (
+  event_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  search_run_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'info',
+  message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS search_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  normalized_title TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  authors_json TEXT NOT NULL DEFAULT '[]',
+  year TEXT NOT NULL DEFAULT '',
+  venue TEXT NOT NULL DEFAULT '',
+  doi TEXT NOT NULL DEFAULT '',
+  paper_url TEXT NOT NULL DEFAULT '',
+  pdf_url TEXT NOT NULL DEFAULT '',
+  abstract TEXT NOT NULL DEFAULT '',
+  abstract_zh TEXT NOT NULL DEFAULT '',
+  keywords_json TEXT NOT NULL DEFAULT '[]',
+  item_type TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  source_mode TEXT NOT NULL DEFAULT 'topic',
+  dedupe_key TEXT NOT NULL DEFAULT '',
+  import_status TEXT NOT NULL DEFAULT 'pending',
+  imported_item_key TEXT NOT NULL DEFAULT '',
+  imported_collection_key TEXT NOT NULL DEFAULT '',
+  first_seen_run_id TEXT NOT NULL DEFAULT '',
+  last_seen_run_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS retrieval_batch_jobs (
   job_id TEXT PRIMARY KEY,
   library_id TEXT NOT NULL,
@@ -141,6 +208,13 @@ CREATE TABLE IF NOT EXISTS retrieval_batch_items (
   started_at TEXT NOT NULL DEFAULT '',
   finished_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE INDEX IF NOT EXISTS idx_search_runs_library_id ON search_runs (library_id);
+CREATE INDEX IF NOT EXISTS idx_search_candidates_library_id ON search_candidates (library_id);
+CREATE INDEX IF NOT EXISTS idx_search_chat_messages_library_id ON search_chat_messages (library_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_search_chat_messages_run_id ON search_chat_messages (search_run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_search_run_events_library_id ON search_run_events (library_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_search_run_events_run_id ON search_run_events (search_run_id, created_at DESC);
 """
 
 
@@ -185,6 +259,15 @@ def ensure_app_store() -> None:
     libraries_dir().mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        search_run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(search_runs)").fetchall()}
+        if search_run_columns and "context_json" not in search_run_columns:
+            conn.execute("ALTER TABLE search_runs ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'")
+        search_candidate_columns = {row["name"] for row in conn.execute("PRAGMA table_info(search_candidates)").fetchall()}
+        if search_candidate_columns and "source" not in search_candidate_columns:
+            conn.execute("ALTER TABLE search_candidates ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        if search_candidate_columns and "item_type" not in search_candidate_columns:
+            conn.execute("ALTER TABLE search_candidates ADD COLUMN item_type TEXT NOT NULL DEFAULT ''")
+        conn.commit()
 
 
 def connect() -> sqlite3.Connection:
@@ -258,6 +341,10 @@ def delete_library_record(library_id: str) -> None:
         conn.execute("DELETE FROM retrieval_batch_context WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_jobs WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_items WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM search_run_events WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM search_chat_messages WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM search_candidates WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM search_runs WHERE library_id = ?", (library_id,))
         conn.commit()
 
 
@@ -1195,6 +1282,515 @@ def recent_retrieval_runs(library_id: str, limit: int = 20) -> list[dict[str, An
                 item[key.replace("_json", "")] = [] if key == "sources_json" else {}
         values.append(item)
     return values
+
+
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _row_to_search_candidate(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        item["authors"] = json.loads(item.pop("authors_json", "[]"))
+    except json.JSONDecodeError:
+        item["authors"] = []
+    try:
+        item["keywords"] = json.loads(item.pop("keywords_json", "[]"))
+    except json.JSONDecodeError:
+        item["keywords"] = []
+    return item
+
+
+def list_search_runs(library_id: str) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM search_runs WHERE library_id = ? ORDER BY started_at DESC",
+            (library_id,),
+        ).fetchall()
+    values: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["context"] = _decode_json_field(item.pop("context_json", "{}"), {})
+        values.append(item)
+    return values
+
+
+def get_search_run(library_id: str, search_run_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM search_runs WHERE library_id = ? AND search_run_id = ?",
+            (library_id, search_run_id),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["context"] = _decode_json_field(item.pop("context_json", "{}"), {})
+    return item
+
+
+def latest_running_search_run(library_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM search_runs
+            WHERE library_id = ? AND status IN ('queued', 'running')
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (library_id,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["context"] = _decode_json_field(item.pop("context_json", "{}"), {})
+    return item
+
+
+def list_search_candidates(library_id: str) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM search_candidates WHERE library_id = ? ORDER BY updated_at DESC, created_at DESC",
+            (library_id,),
+        ).fetchall()
+    return [_row_to_search_candidate(row) for row in rows]
+
+
+def get_search_candidate(library_id: str, candidate_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM search_candidates WHERE library_id = ? AND candidate_id = ?",
+            (library_id, candidate_id),
+        ).fetchone()
+    return _row_to_search_candidate(row) if row else None
+
+
+def list_search_chat_messages(library_id: str, *, limit: int = 60) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM search_chat_messages WHERE library_id = ? ORDER BY created_at ASC LIMIT ?",
+            (library_id, int(limit)),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_search_run_events(library_id: str, search_run_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM search_run_events
+            WHERE library_id = ? AND search_run_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (library_id, search_run_id, int(limit)),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_search_run(
+    library_id: str,
+    *,
+    mode: str,
+    user_request: str,
+    raw_results: list[dict[str, Any]],
+    context: dict[str, Any] | None = None,
+    status: str = "success",
+    thread_id: str = "",
+    assistant_message: str = "",
+    error_message: str = "",
+    inserted_count: int = 0,
+    deduped_count: int = 0,
+    updated_count: int = 0,
+) -> dict[str, Any]:
+    ensure_app_store()
+    started_at = now_iso()
+    search_run_id = f"search-{started_at.replace(':', '').replace('-', '').replace('+00:00', '').replace('T', '-')}-{new_key(6)}"
+    search_runs_dir = library_search_runs_dir(library_id)
+    search_runs_dir.mkdir(parents=True, exist_ok=True)
+    raw_result_path = search_runs_dir / f"{search_run_id}.json"
+    raw_result_path.write_text(
+        json.dumps(
+            {
+                "search_run_id": search_run_id,
+                "library_id": library_id,
+                "mode": mode,
+                "user_request": user_request,
+                "status": status,
+                "results": raw_results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    record = {
+        "search_run_id": search_run_id,
+        "library_id": library_id,
+        "mode": mode,
+        "user_request": user_request,
+        "context_json": json.dumps(context or {}, ensure_ascii=False),
+        "status": status,
+        "candidate_count": len(raw_results),
+        "raw_result_path": str(raw_result_path),
+        "thread_id": str(thread_id or ""),
+        "assistant_message": assistant_message,
+        "error_message": error_message,
+        "inserted_count": inserted_count,
+        "deduped_count": deduped_count,
+        "updated_count": updated_count,
+        "started_at": started_at,
+        "finished_at": started_at if status in {"success", "failed", "stopped", "cancelled"} else "",
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO search_runs (
+              search_run_id, library_id, mode, user_request, context_json, status, candidate_count, raw_result_path,
+              thread_id, assistant_message, error_message, inserted_count, deduped_count, updated_count, started_at, finished_at
+            )
+            VALUES (
+              :search_run_id, :library_id, :mode, :user_request, :context_json, :status, :candidate_count, :raw_result_path,
+              :thread_id, :assistant_message, :error_message, :inserted_count, :deduped_count, :updated_count, :started_at, :finished_at
+            )
+            """,
+            record,
+        )
+        conn.commit()
+    return record
+
+
+def update_search_run(
+    search_run_id: str,
+    *,
+    status: str | None = None,
+    candidate_count: int | None = None,
+    thread_id: str | None = None,
+    assistant_message: str | None = None,
+    error_message: str | None = None,
+    inserted_count: int | None = None,
+    deduped_count: int | None = None,
+    updated_count: int | None = None,
+) -> dict[str, Any] | None:
+    ensure_app_store()
+    timestamp = now_iso()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM search_runs WHERE search_run_id = ?", (search_run_id,)).fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        next_status = str(status or current["status"])
+        finished_at = current["finished_at"]
+        if next_status in {"success", "failed", "stopped", "cancelled"}:
+            finished_at = timestamp
+        elif status is not None:
+            finished_at = ""
+        conn.execute(
+            """
+            UPDATE search_runs
+            SET status = ?, candidate_count = ?, thread_id = ?, assistant_message = ?, error_message = ?,
+                inserted_count = ?, deduped_count = ?, updated_count = ?, finished_at = ?
+            WHERE search_run_id = ?
+            """,
+            (
+                next_status,
+                int(candidate_count if candidate_count is not None else current["candidate_count"]),
+                str(thread_id if thread_id is not None else current.get("thread_id", "")),
+                str(assistant_message if assistant_message is not None else current["assistant_message"]),
+                str(error_message if error_message is not None else current["error_message"]),
+                int(inserted_count if inserted_count is not None else current["inserted_count"]),
+                int(deduped_count if deduped_count is not None else current["deduped_count"]),
+                int(updated_count if updated_count is not None else current["updated_count"]),
+                finished_at,
+                search_run_id,
+            ),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM search_runs WHERE search_run_id = ?", (search_run_id,)).fetchone()
+    return dict(updated) if updated else None
+
+
+def replace_search_run_results(search_run_id: str, *, status: str, raw_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    ensure_app_store()
+    timestamp = now_iso()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM search_runs WHERE search_run_id = ?", (search_run_id,)).fetchone()
+        if not row:
+            return None
+        record = dict(row)
+    raw_result_path = Path(str(record.get("raw_result_path") or ""))
+    raw_result_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_result_path.write_text(
+        json.dumps(
+            {
+                "search_run_id": record["search_run_id"],
+                "library_id": record["library_id"],
+                "mode": record["mode"],
+                "user_request": record["user_request"],
+                "status": status,
+                "results": raw_results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE search_runs
+            SET status = ?, candidate_count = ?, finished_at = ?
+            WHERE search_run_id = ?
+            """,
+            (status, len(raw_results), timestamp if status in {"success", "failed", "stopped", "cancelled"} else "", search_run_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM search_runs WHERE search_run_id = ?", (search_run_id,)).fetchone()
+    return dict(updated) if updated else None
+
+
+def _search_candidate_dedupe_value(payload: dict[str, Any]) -> str:
+    doi = _normalize_text(payload.get("doi")).lower()
+    if doi:
+        return f"doi:{doi}"
+    paper_url = _normalize_text(payload.get("paper_url")).lower()
+    if paper_url:
+        return f"url:{paper_url}"
+    normalized_title = _normalize_text(payload.get("normalized_title")).lower()
+    year = _normalize_text(payload.get("year"))
+    return f"title:{normalized_title}|year:{year}"
+
+
+def upsert_search_candidates(library_id: str, search_run_id: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    ensure_app_store()
+    inserted_count = 0
+    deduped_count = 0
+    updated_ids: list[str] = []
+    timestamp = now_iso()
+    with connect() as conn:
+        existing_rows = conn.execute(
+            "SELECT candidate_id, dedupe_key FROM search_candidates WHERE library_id = ?",
+            (library_id,),
+        ).fetchall()
+        existing_by_dedupe = {str(row["dedupe_key"] or ""): dict(row) for row in existing_rows if str(row["dedupe_key"] or "")}
+        for candidate in candidates:
+            normalized_title = _normalize_text(candidate.get("normalized_title") or candidate.get("title"))
+            authors = candidate.get("authors") if isinstance(candidate.get("authors"), list) else []
+            keywords = candidate.get("keywords") if isinstance(candidate.get("keywords"), list) else []
+            dedupe_key = _search_candidate_dedupe_value(
+                {
+                    "doi": candidate.get("doi"),
+                    "paper_url": candidate.get("paper_url"),
+                    "normalized_title": normalized_title,
+                    "year": candidate.get("year"),
+                }
+            )
+            existing = existing_by_dedupe.get(dedupe_key)
+            source_mode = _normalize_text(candidate.get("source_mode") or candidate.get("mode") or "topic")
+            source = _normalize_text(candidate.get("source") or candidate.get("source_name") or source_mode)
+            if existing:
+                deduped_count += 1
+                conn.execute(
+                    """
+                    UPDATE search_candidates
+                    SET title = ?, normalized_title = ?, authors_json = ?, year = ?, venue = ?, doi = ?, paper_url = ?, pdf_url = ?,
+                        abstract = ?, abstract_zh = ?, keywords_json = ?, item_type = ?, source = ?, source_mode = ?, last_seen_run_id = ?, updated_at = ?
+                    WHERE candidate_id = ?
+                    """,
+                    (
+                        _normalize_text(candidate.get("title")),
+                        normalized_title,
+                        json.dumps(authors, ensure_ascii=False),
+                        _normalize_text(candidate.get("year")),
+                        _normalize_text(candidate.get("venue")),
+                        _normalize_text(candidate.get("doi")),
+                        _normalize_text(candidate.get("paper_url")),
+                        _normalize_text(candidate.get("pdf_url")),
+                        str(candidate.get("abstract") or ""),
+                        str(candidate.get("abstract_zh") or ""),
+                        json.dumps(keywords, ensure_ascii=False),
+                        _normalize_text(candidate.get("item_type")),
+                        source,
+                        source_mode,
+                        search_run_id,
+                        timestamp,
+                        existing["candidate_id"],
+                    ),
+                )
+                updated_ids.append(existing["candidate_id"])
+                continue
+
+            candidate_id = str(candidate.get("candidate_id") or f"cand-{new_key(10)}")
+            record = {
+                "candidate_id": candidate_id,
+                "library_id": library_id,
+                "normalized_title": normalized_title,
+                "title": _normalize_text(candidate.get("title")),
+                "authors_json": json.dumps(authors, ensure_ascii=False),
+                "year": _normalize_text(candidate.get("year")),
+                "venue": _normalize_text(candidate.get("venue")),
+                "doi": _normalize_text(candidate.get("doi")),
+                "paper_url": _normalize_text(candidate.get("paper_url")),
+                "pdf_url": _normalize_text(candidate.get("pdf_url")),
+                "abstract": str(candidate.get("abstract") or ""),
+                "abstract_zh": str(candidate.get("abstract_zh") or ""),
+                "keywords_json": json.dumps(keywords, ensure_ascii=False),
+                "item_type": _normalize_text(candidate.get("item_type")),
+                "source": source,
+                "source_mode": source_mode,
+                "dedupe_key": dedupe_key,
+                "import_status": "pending",
+                "imported_item_key": "",
+                "imported_collection_key": "",
+                "first_seen_run_id": search_run_id,
+                "last_seen_run_id": search_run_id,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            }
+            conn.execute(
+                """
+                INSERT INTO search_candidates (
+                  candidate_id, library_id, normalized_title, title, authors_json, year, venue, doi, paper_url, pdf_url,
+                  abstract, abstract_zh, keywords_json, item_type, source, source_mode, dedupe_key, import_status, imported_item_key,
+                  imported_collection_key, first_seen_run_id, last_seen_run_id, created_at, updated_at
+                ) VALUES (
+                  :candidate_id, :library_id, :normalized_title, :title, :authors_json, :year, :venue, :doi, :paper_url, :pdf_url,
+                  :abstract, :abstract_zh, :keywords_json, :item_type, :source, :source_mode, :dedupe_key, :import_status, :imported_item_key,
+                  :imported_collection_key, :first_seen_run_id, :last_seen_run_id, :created_at, :updated_at
+                )
+                """,
+                record,
+            )
+            existing_by_dedupe[dedupe_key] = {"candidate_id": candidate_id}
+            updated_ids.append(candidate_id)
+            inserted_count += 1
+        conn.commit()
+    return {"inserted_count": inserted_count, "deduped_count": deduped_count, "candidate_ids": updated_ids}
+
+
+def delete_search_candidates(library_id: str, candidate_ids: list[str]) -> int:
+    ensure_app_store()
+    candidate_ids = [str(candidate_id or "").strip() for candidate_id in candidate_ids if str(candidate_id or "").strip()]
+    if not candidate_ids:
+        return 0
+    with connect() as conn:
+        placeholders = ", ".join("?" for _ in candidate_ids)
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM search_candidates WHERE library_id = ? AND candidate_id IN ({placeholders})",
+            (library_id, *candidate_ids),
+        ).fetchone()
+        conn.execute(
+            f"DELETE FROM search_candidates WHERE library_id = ? AND candidate_id IN ({placeholders})",
+            (library_id, *candidate_ids),
+        )
+        conn.commit()
+    return int(row["count"] if row else 0)
+
+
+def mark_search_candidates_imported(library_id: str, updates: list[dict[str, str]]) -> None:
+    ensure_app_store()
+    timestamp = now_iso()
+    with connect() as conn:
+        for update in updates:
+            conn.execute(
+                """
+                UPDATE search_candidates
+                SET import_status = ?, imported_item_key = ?, imported_collection_key = ?, updated_at = ?
+                WHERE library_id = ? AND candidate_id = ?
+                """,
+                (
+                    str(update.get("import_status") or "imported"),
+                    str(update.get("imported_item_key") or ""),
+                    str(update.get("imported_collection_key") or ""),
+                    timestamp,
+                    library_id,
+                    str(update.get("candidate_id") or ""),
+                ),
+            )
+        conn.commit()
+
+
+def append_search_chat_message(
+    library_id: str,
+    *,
+    role: str,
+    content: str,
+    mode: str = "",
+    search_run_id: str = "",
+    inserted_count: int = 0,
+    candidate_count: int = 0,
+) -> dict[str, Any]:
+    ensure_app_store()
+    record = {
+        "message_id": f"msg-{new_key(10).lower()}",
+        "library_id": library_id,
+        "search_run_id": str(search_run_id or ""),
+        "role": str(role or "assistant"),
+        "mode": str(mode or ""),
+        "content": str(content or ""),
+        "inserted_count": int(inserted_count or 0),
+        "candidate_count": int(candidate_count or 0),
+        "created_at": now_iso(),
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO search_chat_messages (
+              message_id, library_id, search_run_id, role, mode, content, inserted_count, candidate_count, created_at
+            ) VALUES (
+              :message_id, :library_id, :search_run_id, :role, :mode, :content, :inserted_count, :candidate_count, :created_at
+            )
+            """,
+            record,
+        )
+        conn.commit()
+    return record
+
+
+def append_search_run_event(
+    library_id: str,
+    search_run_id: str,
+    *,
+    message: str,
+    kind: str = "info",
+) -> dict[str, Any]:
+    ensure_app_store()
+    record = {
+        "event_id": f"event-{new_key(10).lower()}",
+        "library_id": library_id,
+        "search_run_id": search_run_id,
+        "kind": str(kind or "info"),
+        "message": str(message or ""),
+        "created_at": now_iso(),
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO search_run_events (event_id, library_id, search_run_id, kind, message, created_at)
+            VALUES (:event_id, :library_id, :search_run_id, :kind, :message, :created_at)
+            """,
+            record,
+        )
+        conn.commit()
+    return record
+
+
+def cancel_search_run(library_id: str, search_run_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM search_runs WHERE library_id = ? AND search_run_id = ?",
+            (library_id, search_run_id),
+        ).fetchone()
+    if not row:
+        return None
+    return update_search_run(search_run_id, status="cancelled")
 
 
 def retrieval_run_summary(library_id: str, limit: int = 100) -> dict[str, Any]:

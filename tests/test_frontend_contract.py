@@ -213,7 +213,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "论文文献" in app_js
     assert "数据集 / 软件 / 代码对象" in app_js
     assert "本地 / 内部系统" in app_js
-    assert "simple-retrieval-guide" in app_js
     assert "retrieval-advanced" in app_js
     assert "高级设置" in app_js
     assert "function renderRetrievalSourceConfigGuide" in app_js
@@ -260,33 +259,36 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-stop-retrieval-ai-scoring" in app_js
     assert "function stopRetrievalAiScoring" in app_js
     assert "AbortController" in app_js
-    assert "data-simple-ai-query-plan" in app_js
-    assert "按计划批量检索" in app_js
+    assert "主题词检索" in app_js
+    assert "自然语言检索" in app_js
+    assert "智能体检索" in app_js
+    assert "data-search-compile-natural" in app_js
+    assert "data-search-query-card-input" in app_js
+    assert "data-search-select-all" in app_js
+    assert "data-remove-search-candidate" in app_js
+    assert "retrieval-candidate-card" in app_js
+    assert "/search/compile" in app_js
+    assert "/search/run" in app_js
+    assert "/search/status" in app_js
+    assert "/search/candidates/delete" in app_js
+    assert "/search/candidates/import" in app_js
+    assert "/search/candidates/rerank" in app_js
+    assert "data-simple-ai-query-plan" not in app_js
+    assert "按计划批量检索" not in app_js
     assert "调用多源接口" not in app_js
-    assert "simplePlanBatchJobId" in app_js
-    assert "data-simple-plan-batch-status" in app_js
-    assert 'data-select-retrieval-candidates="ai"' in app_js
-    assert "function simplePlanRecommendedSources" in app_js
-    assert "function simplePlanBatchSourceSelection" in app_js
-    assert "retrievalSimpleBatchLimit" in app_js
-    assert "retrievalSimpleSourceLimits" in app_js
-    assert "retrievalBatchMode" in app_js
-    assert "data-simple-batch-mode" in app_js
-    assert "快速模式" in app_js
-    assert "全量模式" in app_js
-    assert "意图：" in app_js
-    assert "data-simple-source-limit" in app_js
-    assert "function simplePlanBatchSourceLimits" in app_js
-    assert "function loadSimplePlanBatchCandidates" in app_js
+    assert "searchMode" in app_js
+    assert "searchMessages" in app_js
+    assert "searchEvents" in app_js
+    assert "searchCompiledQueries" in app_js
+    assert "function renderSearchChatWindow" in app_js
+    assert "function renderSearchQueryCards" in app_js
+    assert "function loadSearchWorkspaceStatus" in app_js
+    assert "function pollSearchWorkspaceStatus" in app_js
+    assert "function runUnifiedSearchTask" in app_js
+    assert "function compileNaturalSearchQueries" in app_js
     assert "function retrievalCandidateTypeMeta" in app_js
     assert "function renderRetrievalZoteroPreview" in app_js
-    assert "retrieval-type-pill" in app_js
-    assert "retrieval-zotero-preview" in app_js
-    assert "data-load-simple-batch-candidates" in app_js
-    assert "/candidates?${params.toString()}" in app_js
-    assert "function currentSimpleBatchLimit" in app_js
-    assert "draftRetrievalBatchQueries({ limit: 5 })" in app_js
-    assert "source_limits: sourceLimits" in app_js
+    assert "mini-status-badge" in app_js
     assert "retrievalRunId" in app_js
     assert "retrievalRuns" in app_js
     assert "retrievalSummary" in app_js
@@ -490,10 +492,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "DEMO RUN" in app_js
     assert "data-download-retrieval-source-setup" in app_js
     assert "data-check-retrieval-readiness" in app_js
-    assert "data-draft-retrieval-batch-queries" in app_js
-    assert "function draftRetrievalBatchQueries" in app_js
-    assert "data-download-retrieval-query-plan" in app_js
-    assert "PLAN RPT" in app_js
     assert "function unavailableRetrievalSources" in app_js
     assert "function availableRetrievalSources" in app_js
     assert "function unavailableRetrievalSourceMessage" in app_js
@@ -643,11 +641,10 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".feature-strip" in app_css
     assert "data-retrieval-page" in features_html
     assert "data-retrieval-page-panel" in features_html
-    assert "多源检索" in features_html
+    assert "文献检索" in features_html
     assert "feature-topbar" in features_html
     assert "推荐流程" not in features_html
     assert "什么时候打开高级区" not in features_html
-    assert ".simple-retrieval-guide" in app_css
     assert ".simple-search-form" in app_css
     assert ".simple-section-title" in app_css
     assert ".simple-source-categories" in app_css
@@ -655,8 +652,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".simple-source-option" in app_css
     assert ".simple-result-tools" in app_css
     assert ".retrieval-ai-row.evaluating" in app_css
-    assert ".simple-plan-source-limits" in app_css
-    assert ".simple-plan-source-limit-grid" in app_css
     assert ".retrieval-advanced" in app_css
     assert ".retrieval-source-config-guide" in app_css
     assert ".retrieval-public-source-category" in app_css
@@ -664,10 +659,12 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".retrieval-source-config-status" in app_css
     assert ".retrieval-advanced-section" in app_css
     assert ".retrieval-candidates" in app_css
-    assert ".retrieval-candidate" in app_css
+    assert ".retrieval-candidate-card" in app_css
+    assert ".search-chat-window" in app_css
+    assert ".chat-message.user" in app_css
+    assert ".feature-page[data-retrieval-page] .feature-shell" in app_css
     assert ".retrieval-type-pill" in app_css
     assert ".retrieval-zotero-preview" in app_css
-    assert ".simple-plan-mode-toggle" in app_css
     assert ".retrieval-stats" in app_css
     assert ".retrieval-actions" in app_css
     assert ".retrieval-local-config" in app_css
@@ -942,9 +939,8 @@ def test_features_index_page_points_to_library_selection() -> None:
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "多源检索" in html
+    assert "文献检索" in html
     assert "选择文库" in html
-    assert "href=\"/\"" in html
 
 
 def test_library_features_page_mounts_retrieval_workspace(
@@ -958,7 +954,7 @@ def test_library_features_page_mounts_retrieval_workspace(
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "多源检索" in html
+    assert "文献检索" in html
     assert "data-retrieval-page" in html
     assert "data-retrieval-page-panel" in html
     assert "返回文库" in html

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import sqlite3
+import time
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -36,7 +37,7 @@ from zotero_web_library.retrieval.providers import (
     search_retrieval,
 )
 from zotero_web_library.sources import create_local_copy, create_read_only_source
-from zotero_web_library import app_store, web
+from zotero_web_library import app_store, search_service, web
 from zotero_web_library.web import create_app
 from zotero_web_library.zotero_adapter import ZoteroRepository
 
@@ -6722,3 +6723,154 @@ def test_retrieval_import_api_is_blocked_for_read_only_sources(
 
     assert response.status_code == 400
     assert response.get_json()["ok"] is False
+
+
+def test_search_run_candidates_keep_provider_source(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+
+    def fake_search(query: str, **kwargs):
+        return {
+            "query": query,
+            "sources": ["crossref"],
+            "source_stats": {"crossref": {"ok": True, "count": 1, "elapsed_ms": 1}},
+            "candidates": [
+                {
+                    "source": "crossref",
+                    "title": "Search Workspace Candidate",
+                    "identifiers": {"doi": "10.4242/search-workspace"},
+                    "item": {
+                        "item_type": "journalArticle",
+                        "fields": {"title": "Search Workspace Candidate", "DOI": "10.4242/search-workspace"},
+                        "identifiers": {"doi": "10.4242/search-workspace"},
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(search_service, "search_retrieval", fake_search)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/search/run",
+        json={"mode": "topic", "user_request": "robot", "source_names": ["crossref"]},
+    )
+
+    assert response.status_code == 200
+    for _ in range(50):
+        status = client.get(f"/api/library/{library['library_id']}/search/status").get_json()
+        assistant_messages = [message for message in status["search_messages"] if message["role"] == "assistant"]
+        if status["candidates"] and assistant_messages:
+            break
+        time.sleep(0.01)
+    candidate = status["candidates"][0]
+    assert candidate["source"] == "crossref"
+    assert candidate["source_mode"] == "topic"
+    assert assistant_messages
+    assert "crossref · 1 条 · 1ms" in assistant_messages[-1]["content"]
+    assert "去重后新增" in assistant_messages[-1]["content"]
+
+
+def test_simple_keyword_query_removes_platform_boolean_noise() -> None:
+    assert (
+        search_service._simple_keyword_query("robotics 2026 GitHub code repository OR implementation OR official code")
+        == "robotics 2026 code repository implementation official code"
+    )
+
+
+def test_natural_search_summarizes_each_source_once(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    run = app_store.create_search_run(
+        library["library_id"],
+        mode="natural",
+        user_request="robot",
+        raw_results=[],
+        status="running",
+    )
+
+    def fake_search(query: str, **kwargs):
+        source = kwargs["sources"][0]
+        return {
+            "query": query,
+            "sources": [source],
+            "source_stats": {source: {"ok": True, "count": 5, "elapsed_ms": 10}},
+            "candidates": [
+                {
+                    "source": source,
+                    "title": f"{source} {query}",
+                    "item": {"item_type": "journalArticle", "fields": {"title": f"{source} {query}"}},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(search_service, "search_retrieval", fake_search)
+    _, message = search_service._run_natural_search(
+        library["library_id"],
+        run["search_run_id"],
+        "robot",
+        [
+            {"query": "robot arm", "source_groups": ["crossref", "arxiv"]},
+            {"query": "dual arm", "source_groups": ["crossref", "arxiv"]},
+        ],
+        ["crossref", "arxiv"],
+    )
+
+    assert message.count("crossref · 10 条") == 1
+    assert message.count("arxiv · 10 条") == 1
+
+
+def test_search_import_keeps_provider_item_type(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+
+    def fake_search(query: str, **kwargs):
+        return {
+            "query": query,
+            "sources": ["github"],
+            "source_stats": {"github": {"ok": True, "count": 1, "elapsed_ms": 1}},
+            "candidates": [
+                {
+                    "source": "github",
+                    "item_type": "computerProgram",
+                    "title": "demo/robot-control",
+                    "paper_url": "https://github.com/demo/robot-control",
+                    "item": {
+                        "item_type": "computerProgram",
+                        "fields": {"title": "demo/robot-control", "url": "https://github.com/demo/robot-control"},
+                        "creators": [],
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(search_service, "search_retrieval", fake_search)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/search/run",
+        json={"mode": "topic", "user_request": "robot code", "source_names": ["github"]},
+    )
+    assert response.status_code == 200
+    for _ in range(50):
+        status = client.get(f"/api/library/{library['library_id']}/search/status").get_json()
+        if status["candidates"]:
+            break
+        time.sleep(0.01)
+    candidate_id = status["candidates"][0]["candidate_id"]
+    assert status["candidates"][0]["item_type"] == "computerProgram"
+
+    imported = client.post(
+        f"/api/library/{library['library_id']}/search/candidates/import",
+        json={"candidate_ids": [candidate_id]},
+    )
+    assert imported.status_code == 200
+    item_key = imported.get_json()["results"][0]["item_key"]
+    item = next(item for item in ZoteroRepository(library).state()["items"] if item["key"] == item_key)
+    assert item["type"] == "computerProgram"

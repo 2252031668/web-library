@@ -74,6 +74,7 @@ from .retrieval.providers import (
     use_ai_pixel_config,
 )
 from .retrieval.rehearsal import write_retrieval_rehearsal_kit
+from .search_service import cancel_active_search, compile_search_queries, queue_search, recover_search_runs, search_status
 from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .sources import (
     SourceError,
@@ -118,6 +119,7 @@ AI_CANDIDATE_MANUAL_EVALUATION_LIMIT = 10
 AI_CANDIDATE_METADATA_ABSTRACT_LIMIT = 600
 AI_CANDIDATE_SCORE_FRAMEWORK = "ai_rubric_v1"
 DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK = "metadata_rules_v1"
+SEARCH_IMPORT_SOURCE_RE = re.compile(r"candidate:([a-zA-Z0-9_-]+)")
 SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(authorization|api[-_ ]?key|token|secret|password|credential|bearer)",
     re.I,
@@ -5884,6 +5886,52 @@ def candidate_missing_fields(candidate: dict[str, Any]) -> list[str]:
     return missing
 
 
+def search_candidate_item_type(candidate: dict[str, Any]) -> str:
+    item_type = str(candidate.get("item_type") or "").strip()
+    if item_type:
+        return item_type
+    source = str(candidate.get("source") or "").strip().lower()
+    if source in {"github", "huggingface"}:
+        return "computerProgram"
+    if source in {"arxiv", "biorxiv", "medrxiv"}:
+        return "preprint"
+    return "journalArticle"
+
+
+def search_candidate_import_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    fields = {
+        "title": str(candidate.get("title") or "").strip(),
+        "date": str(candidate.get("year") or "").strip(),
+        "publicationTitle": str(candidate.get("venue") or "").strip(),
+        "DOI": str(candidate.get("doi") or "").strip(),
+        "url": str(candidate.get("paper_url") or "").strip(),
+        "abstractNote": str(candidate.get("abstract") or candidate.get("abstract_zh") or "").strip(),
+    }
+    creators = []
+    for author in candidate.get("authors") or []:
+        author_text = str(author or "").strip()
+        if not author_text:
+            continue
+        if " " in author_text:
+            parts = author_text.split(" ")
+            creators.append({"first_name": " ".join(parts[:-1]), "last_name": parts[-1]})
+        else:
+            creators.append({"last_name": author_text})
+    return {
+        "candidate_id": candidate_id,
+        "source": str(candidate.get("source") or "").strip(),
+        "item": {
+            "item_type": search_candidate_item_type(candidate),
+            "fields": {key: value for key, value in fields.items() if value},
+            "creators": creators,
+            "tags": [str(keyword).strip() for keyword in (candidate.get("keywords") or []) if str(keyword).strip()],
+            "identifiers": {"doi": str(candidate.get("doi") or "").lower()} if str(candidate.get("doi") or "").strip() else {},
+            "source": f"search:{candidate.get('source_mode') or 'topic'} candidate:{candidate_id}",
+        },
+    }
+
+
 def strict_ai_auto_select(
     decision: str,
     final_confidence: int,
@@ -9135,7 +9183,22 @@ def create_app() -> Flask:
     def features_page(library_id: str):
         library = library_or_404(library_id)
         libraries = app_store.list_libraries()
-        return render_template("features.html", library=library, libraries=libraries)
+        repo = ZoteroRepository(library)
+        recover_search_runs(library_id)
+        status = search_status(library_id)
+        return render_template(
+            "features.html",
+            library=library,
+            libraries=libraries,
+            collections=repo.collections(),
+            search_messages=status.get("search_messages") or [],
+            search_events=status.get("search_events") or [],
+            search_runs=status.get("search_runs") or [],
+            active_search_run=status.get("active_search_run"),
+            folder_key=request.args.get("folder", ""),
+            folder_name="",
+            source_statuses=retrieval_source_statuses(registry=retrieval_provider_registry_for_library(library_id)),
+        )
 
     @app.get("/library/<library_id>")
     def library_page(library_id: str):
@@ -9494,6 +9557,183 @@ def create_app() -> Flask:
             summary = repo.import_metadata_items(parse_import_text(text, fmt), collection_key)
             return jsonify({"ok": True, **summary})
         except (SourceError, ValueError, MetadataImportError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/search/compile")
+    def api_compile_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        user_request = str(payload.get("user_request") or "").strip()
+        source_names = [str(item or "").strip().lower() for item in payload.get("source_names") or [] if str(item or "").strip()]
+        try:
+            library_or_404(library_id)
+            compiled = compile_search_queries(library_id, user_request, source_names)
+            return jsonify({"ok": True, "compiled": compiled})
+        except (SourceError, ValueError, RetrievalError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/search/run")
+    def api_run_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        mode = str(payload.get("mode") or "topic").strip().lower()
+        user_request = str(payload.get("user_request") or "").strip()
+        source_names = [str(item or "").strip().lower() for item in payload.get("source_names") or [] if str(item or "").strip()]
+        compiled_queries = payload.get("compiled_queries") if isinstance(payload.get("compiled_queries"), list) else None
+        try:
+            library_or_404(library_id)
+            result = queue_search(
+                library_id,
+                mode=mode,
+                user_request=user_request,
+                source_names=source_names,
+                compiled_queries=compiled_queries,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, RetrievalError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/search/status")
+    def api_search_status(library_id: str):
+        try:
+            library_or_404(library_id)
+            return jsonify({"ok": True, **search_status(library_id)})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/search/reset")
+    def api_cancel_search(library_id: str):
+        try:
+            library_or_404(library_id)
+            return jsonify({"ok": True, **cancel_active_search(library_id)})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/search/candidates/delete")
+    def api_delete_search_candidates(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        candidate_ids = payload.get("candidate_ids")
+        if not isinstance(candidate_ids, list) or not candidate_ids:
+            return jsonify({"ok": False, "error": "请先选择候选条目。"}), 400
+        try:
+            library_or_404(library_id)
+            removed_count = app_store.delete_search_candidates(library_id, [str(item) for item in candidate_ids])
+            return jsonify({"ok": True, "removed_count": removed_count, "candidates": app_store.list_search_candidates(library_id)})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/search/candidates/import")
+    def api_import_search_candidates(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        candidate_ids = payload.get("candidate_ids")
+        collection_key = str(payload.get("target_collection_key") or payload.get("collection_key") or "").strip() or None
+        if not isinstance(candidate_ids, list) or not candidate_ids:
+            return jsonify({"ok": False, "error": "请先选择候选条目。"}), 400
+        library = library_or_404(library_id)
+        repo = ZoteroRepository(library)
+        candidates = []
+        for candidate_id in [str(item) for item in candidate_ids if str(item).strip()]:
+            candidate = app_store.get_search_candidate(library_id, candidate_id)
+            if not candidate:
+                continue
+            candidates.append(search_candidate_import_payload(candidate))
+        if not candidates:
+            return jsonify({"ok": False, "error": "没有找到可导入的候选条目。"}), 400
+        try:
+            summary = repo.import_metadata_items(imported_items_from_candidates(candidates), collection_key)
+        except (SourceError, ValueError, MetadataImportError, OSError, CandidateImportError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        updates: list[dict[str, str]] = []
+        for result in summary.get("results", []):
+            source_text = str(result.get("source") or "")
+            match = SEARCH_IMPORT_SOURCE_RE.search(source_text)
+            candidate_id = match.group(1) if match else ""
+            if not candidate_id:
+                continue
+            status = str(result.get("status") or "failed")
+            import_status = "failed"
+            if status == "created":
+                import_status = "imported"
+            elif status == "existing":
+                import_status = "duplicate_reused"
+            updates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "import_status": import_status,
+                    "imported_item_key": str(result.get("item_key") or ""),
+                    "imported_collection_key": collection_key or "",
+                }
+            )
+        app_store.mark_search_candidates_imported(library_id, updates)
+        return jsonify({"ok": True, **summary, "candidates": app_store.list_search_candidates(library_id)})
+
+    @app.post("/api/library/<library_id>/search/candidates/rerank")
+    def api_rerank_search_candidates(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        query = str(payload.get("user_request") or payload.get("query") or "").strip()
+        candidate_ids = payload.get("candidate_ids")
+        if not query:
+            return jsonify({"ok": False, "error": "检索词不能为空。"}), 400
+        try:
+            library_or_404(library_id)
+            pool = app_store.list_search_candidates(library_id)
+            selected_ids = {
+                str(item).strip() for item in candidate_ids if str(item).strip()
+            } if isinstance(candidate_ids, list) and candidate_ids else set()
+            candidates = [item for item in pool if item.get("source_mode") in {"topic", "natural"} and (not selected_ids or item.get("candidate_id") in selected_ids)]
+            if not candidates:
+                raise ValueError("没有可排序的主题词/自然语言候选。")
+            candidate_payloads = []
+            for candidate in candidates:
+                candidate_payloads.append(
+                    {
+                        "candidate_id": candidate.get("candidate_id"),
+                        "title": candidate.get("title"),
+                        "year": candidate.get("year"),
+                        "abstract": candidate.get("abstract") or candidate.get("abstract_zh"),
+                        "landing_url": candidate.get("paper_url"),
+                        "source": candidate.get("source_mode"),
+                        "sources": [candidate.get("source_mode")],
+                        "identifiers": {"doi": candidate.get("doi")} if candidate.get("doi") else {},
+                        "creators": [{"name": author} for author in (candidate.get("authors") or []) if str(author).strip()],
+                    }
+                )
+            summary = evaluate_retrieval_candidates_with_ai(
+                library_id,
+                query,
+                candidate_payloads,
+                use_ai_evaluation=True,
+            )
+            ordered = sort_candidates_by_ai_evaluation(candidate_payloads)
+            by_id = {str(item.get("candidate_id") or ""): item for item in ordered}
+            ranked_pool: list[dict[str, Any]] = []
+            prioritized = sorted(
+                [item for item in pool if item.get("source_mode") == "agent"],
+                key=lambda item: str(item.get("updated_at") or ""),
+                reverse=True,
+            )
+            ranked_pool.extend(prioritized)
+            reranked = []
+            untouched = []
+            for item in pool:
+                candidate_id = str(item.get("candidate_id") or "")
+                evaluation = by_id.get(candidate_id)
+                if evaluation:
+                    enriched = dict(item)
+                    enriched["ai_evaluation"] = evaluation.get("ai_evaluation")
+                    reranked.append(enriched)
+                elif item.get("source_mode") != "agent":
+                    untouched.append(item)
+            reranked = sorted(
+                reranked,
+                key=lambda item: (
+                    0 if item.get("ai_evaluation", {}).get("auto_select") else 1,
+                    {"recommend": 0, "review": 1, "reject": 2}.get(str(item.get("ai_evaluation", {}).get("decision") or "review"), 1),
+                    -float(item.get("ai_evaluation", {}).get("final_confidence_score") or 0),
+                ),
+            )
+            ranked_pool.extend(reranked)
+            ranked_pool.extend(untouched)
+            return jsonify({"ok": True, "candidates": ranked_pool, "ai_evaluation_summary": summary})
+        except (SourceError, ValueError, RetrievalError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.post("/api/library/<library_id>/retrieval/search")
