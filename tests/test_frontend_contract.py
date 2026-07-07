@@ -50,6 +50,8 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     app_js = (root / "src" / "zotero_web_library" / "static" / "app.js").read_text(encoding="utf-8")
     app_css = (root / "src" / "zotero_web_library" / "static" / "app.css").read_text(encoding="utf-8")
     library_html = (root / "src" / "zotero_web_library" / "templates" / "library.html").read_text(encoding="utf-8")
+    knowledge_html = (root / "src" / "zotero_web_library" / "templates" / "knowledge.html").read_text(encoding="utf-8")
+    knowledge_js = (root / "src" / "zotero_web_library" / "static" / "knowledge.js").read_text(encoding="utf-8")
     api_config_html = (root / "src" / "zotero_web_library" / "templates" / "api_config.html").read_text(encoding="utf-8")
     reader_html = (root / "src" / "zotero_web_library" / "templates" / "reader.html").read_text(encoding="utf-8")
     reader_js = (root / "src" / "zotero_web_library" / "static" / "reader.js").read_text(encoding="utf-8")
@@ -98,6 +100,10 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-selected-count" in app_js
     assert "data-bulk-action" in app_js
     assert "删除条目" in library_html
+    assert "导入知识库" in library_html
+    assert "data-bulk-action=\"import-knowledge\"" in library_html
+    assert "文献矩阵" not in library_html
+    assert "知识库问答" not in library_html
     assert "data-bulk-action=\"move-items\"" in library_html
     assert "附件编辑" in library_html
     assert "文献研读" in library_html
@@ -106,8 +112,20 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-bulk-action=\"read-paper\"" in library_html
     assert "features_page" in library_html
     assert "多源检索" in library_html
+    assert "knowledge_page" in library_html
+    assert "knowledge_page" in api_config_html
+    assert "knowledge_page" in reader_html
+    assert "knowledge_page" in features_html
     assert "api_config_page" in library_html
     assert "API 配置" in library_html
+    assert "title=\"知识库\"" in knowledge_html
+    assert "data-knowledge-page" in knowledge_html
+    assert "data-knowledge-workbench" in knowledge_html
+    assert "data-knowledge-list" in knowledge_html
+    assert "data-knowledge-matrix-head" in knowledge_html
+    assert "data-knowledge-matrix-body" in knowledge_html
+    assert "data-knowledge-placeholder-action=\"create\"" in knowledge_html
+    assert "新建知识库" in knowledge_html
     assert "data-api-config-page" in api_config_html
     assert "data-api-config-panel" in api_config_html
     assert "api_config_page" in features_html
@@ -120,6 +138,21 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "模型名称" in app_js
     assert "请求地址" in app_js
     assert "API Key" in app_js
+    assert "Codex 模型配置" in app_js
+    assert "data-codex-config-form" in app_js
+    assert "data-save-codex-config" in app_js
+    assert "data-toggle-codex-config-secret" in app_js
+    assert "保存 Codex 设置" in app_js
+    assert "Reasoning Effort" in app_js
+    assert "openai-codex" in app_js
+    assert "模型档案" not in app_js
+    assert "新增档案" not in app_js
+    assert "删除当前档案" not in app_js
+    assert "Runtime Kind" not in app_js
+    assert "Selected Agent" not in app_js
+    assert "Reasoning Summary" not in app_js
+    assert "Tool Policy" not in app_js
+    assert "启用流式输出" not in app_js
     assert "GitHub Token" in app_js
     assert "HuggingFace Token" in app_js
     assert "Zenodo Token" in app_js
@@ -129,6 +162,7 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-mineru-config-form" in app_js
     assert "data-save-mineru-config" in app_js
     assert "data-toggle-mineru-config-secret" in app_js
+    assert ".api-config-field-grid" in app_css
     assert "data-attachment-editor-modal" in library_html
     assert "data-reader-pdf-picker-modal" in library_html
     assert "data-delete-items-modal" in library_html
@@ -258,6 +292,14 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "retrievalSummary" in app_js
     assert "function renderRetrievalSummary" in app_js
     assert "function loadRetrievalSummary" in app_js
+    assert "\"import-knowledge\", \"导入知识库\"" in app_js
+    assert "setupKnowledgePage();" in knowledge_js
+    assert "knowledge-workbench" in knowledge_js
+    assert "notifyKnowledgePlaceholder" in knowledge_js
+    assert ".knowledge-workbench" in app_css
+    assert ".knowledge-create-btn" in app_css
+    assert ".matrix-table" in app_css
+
     assert "function downloadRetrievalSummaryReport" in app_js
     assert "retrievalLocalPaths" in app_js
     assert "retrievalLocalFieldMap" in app_js
@@ -699,8 +741,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "文献下载" in library_html
     assert "期刊&会议等级查询" in library_html
     assert "引用导出" in library_html
-    assert "文献矩阵" in library_html
-    assert "知识库问答" in library_html
+    assert "导入知识库" in library_html
+    assert "文献矩阵" not in library_html
+    assert "知识库问答" not in library_html
     assert "title=\"文献研读\"" in library_html
     assert "button:hover ~ button" not in app_css
     assert ".form-action-btn" in app_css
@@ -936,6 +979,23 @@ def test_library_api_config_page_mounts_config_workspace(
     assert "data-api-config-page" in html
     assert "data-api-config-panel" in html
     assert "多源检索" in html
+
+
+def test_knowledge_page_route_renders_placeholder(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.get(f"/library/{library['library_id']}/knowledge")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "知识库" in html
+    assert "data-knowledge-page" in html
+    assert "data-knowledge-workbench" in html
+    assert "新建知识库" in html
 
 
 def test_ai_retrieval_review_guide_documents_review_flow() -> None:
