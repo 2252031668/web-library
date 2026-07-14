@@ -332,6 +332,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-stop-reading-matrix" in knowledge_html
     assert "conversationId" in knowledge_js
     assert "resetKnowledgeConversation" in knowledge_js
+    assert "activeKnowledgeBase" in knowledge_js
+    assert "loadKnowledgeConversation" in knowledge_js
+    assert "/chat/history?" in knowledge_js
     assert "function renderKnowledgeToolTrace" in knowledge_js
     assert "检索步骤" in knowledge_js
     assert ".knowledge-workbench" in app_css

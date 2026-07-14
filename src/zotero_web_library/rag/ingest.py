@@ -303,6 +303,7 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
                     placeholders = ",".join("?" for _ in chunk_ids)
                     conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
                 conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc["doc_id"],))
+                conn.execute("DELETE FROM rag_chunk_parents WHERE doc_id = ?", (doc["doc_id"],))
                 conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc["doc_id"],))
                 insert_chunks(conn, doc, chunks)
             conn.execute("DELETE FROM rag_assets WHERE doc_id = ?", (doc["doc_id"],))

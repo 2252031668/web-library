@@ -63,10 +63,14 @@ def _normalize_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         "year": str(raw.get("year") or source.get("year") or ""),
         "venue": str(raw.get("venue") or source.get("venue") or ""),
         "section_title": str(raw.get("section_title") or source.get("section_title") or ""),
+        "section_path": str(raw.get("section_path") or source.get("section_path") or ""),
+        "parent_chunk_id": str(raw.get("parent_chunk_id") or source.get("parent_chunk_id") or ""),
         "estimated_page": raw.get("estimated_page", source.get("estimated_page")),
         "excerpt": excerpt[:700],
         "score": raw.get("score"),
         "scores": raw.get("scores") or {},
+        "query_lineage": raw.get("query_lineage") or [],
+        "selection_reason": str(raw.get("selection_reason") or ""),
         "rank": raw.get("rank"),
         "citation": str(raw.get("citation") or _citation(source_type=source_type, item_key=item_key, chunk_id=chunk_id)),
     }
@@ -112,8 +116,15 @@ def _slim_evidence(
         "authors_text": evidence.get("authors_text", ""),
         "year": evidence.get("year", ""),
         "section_title": evidence.get("section_title", ""),
+        "section_path": evidence.get("section_path", ""),
+        "parent_chunk_id": evidence.get("parent_chunk_id", ""),
+        "item_key": evidence.get("item_key", ""),
         "chunk_id": evidence.get("chunk_id", ""),
         "excerpt": str(evidence.get("excerpt") or "")[:excerpt_limit],
+        "retrieval_type": evidence.get("retrieval_type", ""),
+        "scores": evidence.get("scores") or {},
+        "query_lineage": evidence.get("query_lineage") or [],
+        "selection_reason": evidence.get("selection_reason", ""),
     }
     if include_text:
         payload["text"] = str(text or evidence.get("excerpt") or "")[:text_limit]

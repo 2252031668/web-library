@@ -3,6 +3,7 @@ from __future__ import annotations
 from .agent import run_agentic_chat
 from .embeddings import embed_missing_chunks, embedding_status
 from .ingest import index_library, index_mineru_results
+from .query import build_query_plan
 from .store import (
     add_knowledge_base_items,
     create_knowledge_base,
@@ -19,6 +20,7 @@ from .tools import chunk_read, keyword_search, metadata_search, semantic_search
 
 __all__ = [
     "chunk_read",
+    "build_query_plan",
     "embed_missing_chunks",
     "embedding_status",
     "embedding_config",

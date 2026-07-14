@@ -21,7 +21,9 @@
 - `rag_embeddings` 每个 `chunk_id` 保存一条 embedding。
 - `rag_chunks.embedding_status` 记录 `not_configured`、`pending`、`embedded` 或 `failed`。
 - `rag_embeddings.content_hash` 必须和 `rag_chunks.content_hash` 一致；不一致时视为过期，需要重建。
+- `rag_embeddings.content_version` 必须和 `rag_chunks.content_version` 一致；当前版本为 `structured-parent-v1`。
 - `rag_chunks.embedding_model` 保存 `<provider>:<model>`，用于判断模型切换后的增量重建。
+- `rag_config.schema_version`、`chunk_content_version` 和 `index_status.requires_reindex` 用于识别旧索引迁移。
 
 权威文本、元数据、来源信息和知识库成员关系仍然以 `rag.sqlite` 中的 RAG 表为准。`rag_embeddings` 只是派生向量索引，可以删除后重建。
 
@@ -120,13 +122,71 @@ POST /api/library/<library_id>/rag/tools/semantic_search
 - `mode="hybrid"`：metadata + keyword + semantic。
 - `mode="auto"`：默认 metadata + keyword；只有 embedding 已配置时才加入 semantic。
 
+`hybrid` / `auto` 中的 semantic 是可降级分支：如果 Embedding provider 在查询阶段不可用、配置错误或请求失败，检索会保留 metadata + keyword 结果，并在 Evidence Pack 中返回 `semantic_search_failed` warning，而不是让整个 Agent 工具调用变成 `tool_failed`。`mode="semantic"` 也会以结构化失败状态返回，便于上层决定是否换策略。
+
 hybrid 排序按 `chunk_id` 去重，并组合 rank 风格分数：
 
-- keyword rank 权重：`0.55`
-- semantic rank 权重：`0.35`
-- metadata rank 权重：`0.10`
+1. 先识别 `factual`、`summary`、`comparative`、`matrix`、`writing` 或 `scope` 任务类型。
+2. 规范化中英文问题，并为复杂问题生成最多 4 个带 `query_id` / `parent_query_id` 的查询。
+3. 每个查询分别执行允许的 metadata、keyword 和 semantic 分支。
+4. 使用标准 Reciprocal Rank Fusion：每次命中的贡献为 `1 / (60 + rank)`。
+5. 可选执行 cross-encoder reranker；未配置或失败时保留 RRF 顺序。
+6. 最后执行多样性选择；比较任务优先保证不同 `item_key` 的覆盖。
 
-Evidence Pack 保留原有 `score` 字段，保证前端和 Codex prompt 兼容；同时新增 `scores` 对象保存各路分数组件。
+Evidence Pack 保留原有 `score` 字段，并增加：
+
+- `query_plan`：规范化问题、任务类型和子查询 lineage。
+- `ranking_stages`：RRF、reranker 和 diversity 的状态。
+- `scores.rrf_score`、可选 `scores.reranker_score` 和 `scores.selection_score`。
+- 每条结果的 `query_lineage` 和 `selection_reason`。
+
+## 结构化 chunk 与父级上下文
+
+MinerU Markdown 会保留完整标题路径，例如 `Paper > Method > Experiments`，并把正文标记为：
+
+- `abstract`
+- `method`
+- `results`
+- `table`
+- `figure_caption`
+- `references`
+- `paragraph`
+
+FTS 和向量索引继续使用较小的 `rag_chunks` 做召回；每个子 chunk 通过 `parent_chunk_id` 指向 `rag_chunk_parents` 中的章节上下文。`retrieve(include_context=True)` 和 `read_chunk_context` 命中子块后优先返回父级章节文本，从而兼顾召回精度和回答上下文完整性。
+
+旧数据库会自动补齐新字段，但旧 chunk 会保留 `legacy-v1` 标记。`GET /api/library/<library_id>/rag/index/status` 返回 `requires_reindex=true` 时，使用知识库页面的“刷新 RAG 索引”或调用索引接口重建；Embedding 会因为内容版本不一致自动进入待重建状态。
+
+## Metadata filters
+
+`retrieve`、`keyword_search`、`semantic_search` 和 Agent 的 `search_evidence` 都接受同一种过滤器：
+
+```json
+{
+  "filters": {
+    "year_from": 2022,
+    "year_to": 2026,
+    "authors": ["Kim"],
+    "venues": ["ICRA"],
+    "item_keys": ["ITEM0001"],
+    "chunk_types": ["method", "results"]
+  }
+}
+```
+
+`item_keys` filter 永远和会话快照/知识库后端作用域取交集，不能借此扩大范围。作者和 venue 当前使用 SQLite 子串匹配，年份使用闭区间过滤。
+
+## 可选 cross-encoder reranker
+
+默认不启用 reranker，也不增加新 Python 依赖。若已有兼容 HTTP rerank 服务，可设置：
+
+```text
+WEB_LIBRARY_RERANKER_URL=http://127.0.0.1:8080/rerank
+WEB_LIBRARY_RERANKER_MODEL=bge-reranker-v2-m3
+WEB_LIBRARY_RERANKER_API_KEY=
+WEB_LIBRARY_RERANKER_TIMEOUT=12
+```
+
+请求体为 `{"model":"...","query":"...","documents":["..."]}`；响应可使用 `scores` 数组，或包含 `index` 与 `score`/`relevance_score` 的 `results` 数组。超时、响应格式错误或服务故障会产生 `reranker_failed` warning，并继续使用本地 RRF 结果。
 
 ## 后续 FAISS 替换点
 

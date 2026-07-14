@@ -7,6 +7,8 @@ from typing import Any
 from zotero_web_library import app_store
 from zotero_web_library.codex_agent import build_config_overrides, build_runtime_config
 from zotero_web_library.rag import index_library
+from zotero_web_library.rag.agent.memory import get_or_create_session, save_turn
+from zotero_web_library.rag.store import create_knowledge_base
 from zotero_web_library.sources import create_local_copy
 from zotero_web_library.web import API_CONFIG_PREFERENCE_KEY, create_app
 
@@ -167,3 +169,38 @@ def test_rag_chat_requires_model_config(
     payload = response.get_json()
     assert payload["ok"] is False
     assert "模型 API 配置不完整" in payload["error"]
+
+
+def test_rag_chat_history_restores_latest_knowledge_base_conversation(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    knowledge_base = create_knowledge_base(library, name="Core", item_keys=["ITEM0001"])
+    session = get_or_create_session(
+        library,
+        knowledge_base_id=knowledge_base["knowledge_base_id"],
+    )
+    save_turn(
+        library,
+        session,
+        question="Action chunking 有什么作用？",
+        answer="它用于增强长时程操作的鲁棒性。",
+        sources=[{"citation": "[ITEM0001:chunk-test]"}],
+        tool_trace=[{"tool": "search_evidence", "ok": True, "result_count": 1}],
+    )
+    client = create_app().test_client()
+
+    response = client.get(
+        f"/api/library/{library['library_id']}/rag/chat/history",
+        query_string={"knowledge_base_id": knowledge_base["knowledge_base_id"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["conversation_id"] == session.conversation_id
+    assert [message["role"] for message in payload["messages"]] == ["user", "assistant"]
+    assert payload["messages"][1]["sources"][0]["citation"] == "[ITEM0001:chunk-test]"
+    assert payload["messages"][1]["tool_trace"][0]["tool"] == "search_evidence"

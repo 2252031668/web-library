@@ -7,6 +7,7 @@ import struct
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from zotero_web_library.rag.query import intersect_item_keys, normalize_search_filters
 from zotero_web_library.rag.store import (
     connect,
     embedding_config,
@@ -216,6 +217,7 @@ def embed_missing_chunks(
                 "dim": dim,
                 "embedding": pack_embedding(normalized),
                 "content_hash": row["content_hash"],
+                "content_version": row["content_version"],
                 "embedding_hash": text_hash(pack_embedding(normalized)),
                 "created_at": timestamp,
                 "updated_at": timestamp,
@@ -224,11 +226,11 @@ def embed_missing_chunks(
                 """
                 INSERT INTO rag_embeddings (
                   chunk_id, library_id, provider, model, dim, embedding,
-                  content_hash, embedding_hash, created_at, updated_at
+                  content_hash, content_version, embedding_hash, created_at, updated_at
                 )
                 VALUES (
                   :chunk_id, :library_id, :provider, :model, :dim, :embedding,
-                  :content_hash, :embedding_hash, :created_at, :updated_at
+                  :content_hash, :content_version, :embedding_hash, :created_at, :updated_at
                 )
                 ON CONFLICT(chunk_id) DO UPDATE SET
                   library_id = excluded.library_id,
@@ -237,6 +239,7 @@ def embed_missing_chunks(
                   dim = excluded.dim,
                   embedding = excluded.embedding,
                   content_hash = excluded.content_hash,
+                  content_version = excluded.content_version,
                   embedding_hash = excluded.embedding_hash,
                   updated_at = excluded.updated_at
                 """,
@@ -292,6 +295,7 @@ def semantic_search_vectors(
     chunk_type: str = "",
     knowledge_base_id: str = "",
     item_keys: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
     provider: EmbeddingProvider | None = None,
 ) -> dict[str, Any]:
     ensure_store(library)
@@ -303,9 +307,15 @@ def semantic_search_vectors(
     if active_provider is None:
         return {"query": clean_query, "results": [], "status": "not_configured"}
 
+    filter_payload = normalize_search_filters(filters)
     scope = _scope_item_keys(library, knowledge_base_id=knowledge_base_id, item_keys=item_keys)
+    filter_item_keys = filter_payload.get("item_keys")
+    if filter_item_keys is not None:
+        scope = intersect_item_keys(scope, filter_item_keys)
     if knowledge_base_id and not scope:
-        return {"query": clean_query, "knowledge_base_id": str(knowledge_base_id or ""), "results": [], "status": "empty_scope"}
+        return {"query": clean_query, "knowledge_base_id": str(knowledge_base_id or ""), "filters": filter_payload, "results": [], "status": "empty_scope"}
+    if filter_item_keys is not None and not scope:
+        return {"query": clean_query, "knowledge_base_id": str(knowledge_base_id or ""), "filters": filter_payload, "results": [], "status": "empty_scope"}
 
     query_vector = _normalize(_embed_texts_batched(active_provider, [clean_query])[0])
     rows = _candidate_embeddings(
@@ -313,6 +323,7 @@ def semantic_search_vectors(
         provider=active_provider,
         chunk_type=chunk_type,
         item_keys=scope,
+        filters=filter_payload,
     )
     scored: list[dict[str, Any]] = []
     for row in rows:
@@ -329,6 +340,7 @@ def semantic_search_vectors(
     return {
         "query": clean_query,
         "knowledge_base_id": str(knowledge_base_id or ""),
+        "filters": filter_payload,
         "status": "ok",
         "provider": active_provider.provider_name,
         "model": active_provider.model,
@@ -381,6 +393,7 @@ def _chunks_needing_embedding(
               OR e.provider != ?
               OR e.model != ?
               OR e.content_hash != c.content_hash
+              OR e.content_version != c.content_version
             )
             """
         )
@@ -406,23 +419,45 @@ def _candidate_embeddings(
     provider: EmbeddingProvider,
     chunk_type: str,
     item_keys: list[str] | None,
+    filters: dict[str, Any],
 ) -> list[sqlite3.Row]:
     where = [
         "e.provider = ?",
         "e.model = ?",
         "e.content_hash = c.content_hash",
+        "e.content_version = c.content_version",
         "c.embedding_status = 'embedded'",
     ]
     params: list[Any] = [provider.provider_name, provider.model]
+    chunk_types = list(filters.get("chunk_types") or [])
+    if chunk_type and chunk_types and str(chunk_type) not in chunk_types:
+        return []
     if chunk_type:
-        where.append("c.chunk_type = ?")
-        params.append(str(chunk_type))
+        chunk_types = [str(chunk_type)]
+    if chunk_types:
+        placeholders = ",".join("?" for _ in chunk_types)
+        where.append(f"c.chunk_type IN ({placeholders})")
+        params.extend(chunk_types)
     if item_keys is not None:
         if not item_keys:
             return []
         placeholders = ",".join("?" for _ in item_keys)
         where.append(f"c.item_key IN ({placeholders})")
         params.extend(item_keys)
+    if filters.get("year_from") is not None:
+        where.append("CAST(NULLIF(d.year, '') AS INTEGER) >= ?")
+        params.append(filters["year_from"])
+    if filters.get("year_to") is not None:
+        where.append("CAST(NULLIF(d.year, '') AS INTEGER) <= ?")
+        params.append(filters["year_to"])
+    authors = list(filters.get("authors") or [])
+    if authors:
+        where.append("(" + " OR ".join("d.creators_text LIKE ?" for _ in authors) + ")")
+        params.extend(f"%{author}%" for author in authors)
+    venues = list(filters.get("venues") or [])
+    if venues:
+        where.append("(" + " OR ".join("d.venue LIKE ?" for _ in venues) + ")")
+        params.extend(f"%{venue}%" for venue in venues)
     with connect(library) as conn:
         return conn.execute(
             f"""
@@ -433,6 +468,9 @@ def _candidate_embeddings(
               c.attachment_key,
               c.chunk_type,
               c.section_title,
+              c.section_path,
+              c.parent_chunk_id,
+              c.chunk_index,
               c.excerpt,
               c.estimated_page,
               c.content,
@@ -483,6 +521,8 @@ def _source_for_chunk_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "venue": item.get("venue", ""),
         "source_type": item.get("document_source_type", ""),
         "section_title": item.get("section_title", ""),
+        "section_path": item.get("section_path", ""),
+        "parent_chunk_id": item.get("parent_chunk_id", ""),
         "estimated_page": item.get("estimated_page"),
         "excerpt": item.get("excerpt") or str(item.get("content") or "")[:320],
     }

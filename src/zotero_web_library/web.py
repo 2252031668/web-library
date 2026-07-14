@@ -13,6 +13,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from collections import Counter
@@ -57,6 +58,7 @@ from .rag import (
     semantic_search as rag_semantic_search,
 )
 from .rag.agent.client import missing_model_config_fields, normalize_openai_base_url
+from .rag.agent.memory import load_conversation
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
 from .retrieval.models import SearchOptions, candidate_material_type, normalized_material_type
@@ -14491,6 +14493,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_retrieve(
                 library_or_404(library_id),
@@ -14501,6 +14505,7 @@ def create_app() -> Flask:
                 top_k=int(payload.get("top_k") or 8),
                 include_context=bool(payload.get("include_context", True)),
                 context_window=int(payload.get("context_window") or 1),
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
@@ -14522,6 +14527,22 @@ def create_app() -> Flask:
                 }
             )
         except SourceError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/chat/history")
+    def api_rag_chat_history(library_id: str):
+        conversation_id = str(request.args.get("conversation_id") or "").strip()
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or "").strip()
+        if not conversation_id and not knowledge_base_id:
+            return jsonify({"ok": False, "error": "conversation_id 和 knowledge_base_id 至少需要一个。"}), 400
+        try:
+            conversation = load_conversation(
+                library_or_404(library_id),
+                conversation_id=conversation_id,
+                knowledge_base_id=knowledge_base_id,
+            )
+            return jsonify({"ok": True, **conversation})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.post("/api/library/<library_id>/rag/chat")
@@ -14876,6 +14897,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_keyword_search(
                 library_or_404(library_id),
@@ -14884,6 +14907,7 @@ def create_app() -> Flask:
                 chunk_type=str(payload.get("chunk_type") or ""),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
@@ -14894,6 +14918,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_metadata_search(
                 library_or_404(library_id),
@@ -14901,6 +14927,7 @@ def create_app() -> Flask:
                 top_k=int(payload.get("top_k") or 10),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
@@ -14911,6 +14938,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_semantic_search(
                 library_or_404(library_id),
@@ -14919,6 +14948,7 @@ def create_app() -> Flask:
                 chunk_type=str(payload.get("chunk_type") or ""),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:

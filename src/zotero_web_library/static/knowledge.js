@@ -13,6 +13,7 @@ const knowledgeState = {
   searchQuery: "",
   searchResults: [],
   searchBusy: false,
+  chatLoading: false,
   chatBusy: false,
   chatMessages: [],
   conversationId: "",
@@ -68,8 +69,17 @@ function matrixApi(path) {
 }
 
 function resetKnowledgeConversation() {
+  knowledgeState.chatLoading = false;
   knowledgeState.conversationId = "";
   knowledgeState.chatMessages = [];
+}
+
+function persistActiveKnowledgeBase() {
+  if (knowledgeState.activeId) {
+    localStorage.setItem(knowledgeStorageKey("activeKnowledgeBase"), knowledgeState.activeId);
+  } else {
+    localStorage.removeItem(knowledgeStorageKey("activeKnowledgeBase"));
+  }
 }
 
 function setKnowledgeMessage(message) {
@@ -127,6 +137,7 @@ async function loadKnowledgeBases({ keepActive = true } = {}) {
     if (!keepActive || !knowledgeState.knowledgeBases.some((item) => item.knowledge_base_id === knowledgeState.activeId)) {
       knowledgeState.activeId = knowledgeState.knowledgeBases[0]?.knowledge_base_id || "";
     }
+    persistActiveKnowledgeBase();
     if (knowledgeState.activeId !== previousActiveId) resetKnowledgeConversation();
     if (knowledgeState.activeId) await loadKnowledgeBaseDetail(knowledgeState.activeId);
     else {
@@ -158,20 +169,55 @@ async function loadKnowledgeBaseDetail(knowledgeBaseId) {
   const cleanId = String(knowledgeBaseId || "").trim();
   if (!cleanId) {
     knowledgeState.activeBase = null;
+    knowledgeState.activeId = "";
+    persistActiveKnowledgeBase();
+    resetKnowledgeConversation();
     renderKnowledgeMatrix();
     return;
   }
   try {
     const data = await knowledgeJSON(knowledgeApi(`/knowledge-bases/${encodeURIComponent(cleanId)}`));
-  knowledgeState.activeBase = data.knowledge_base || null;
-  knowledgeState.activeId = cleanId;
+    if (knowledgeState.activeId !== cleanId) return;
+    knowledgeState.activeBase = data.knowledge_base || null;
+    knowledgeState.activeId = cleanId;
+    persistActiveKnowledgeBase();
   } catch (error) {
+    if (knowledgeState.activeId !== cleanId) return;
     knowledgeState.activeBase = null;
     setKnowledgeMessage(error.message);
   }
   renderKnowledgeList();
   renderKnowledgeMatrix();
-  loadMatrixState();
+  await Promise.all([loadKnowledgeConversation(cleanId), loadMatrixState()]);
+}
+
+async function loadKnowledgeConversation(knowledgeBaseId) {
+  const cleanId = String(knowledgeBaseId || "").trim();
+  if (!cleanId || cleanId !== knowledgeState.activeId) return;
+  resetKnowledgeConversation();
+  knowledgeState.chatLoading = true;
+  renderKnowledgeChat();
+  try {
+    const query = new URLSearchParams({ knowledge_base_id: cleanId });
+    const data = await knowledgeJSON(knowledgeApi(`/chat/history?${query.toString()}`));
+    if (cleanId !== knowledgeState.activeId) return;
+    knowledgeState.conversationId = data.conversation_id || "";
+    knowledgeState.chatMessages = (data.messages || []).map((message) => ({
+      role: message.role || "assistant",
+      content: message.content || "",
+      sources: message.sources || [],
+      toolTrace: message.tool_trace || [],
+    }));
+  } catch (error) {
+    if (cleanId !== knowledgeState.activeId) return;
+    resetKnowledgeConversation();
+    setKnowledgeMessage(`恢复知识库会话失败：${error.message}`);
+  } finally {
+    if (cleanId === knowledgeState.activeId) {
+      knowledgeState.chatLoading = false;
+      renderKnowledgeChat();
+    }
+  }
 }
 
 async function createKnowledgeBaseFromPrompt() {
@@ -216,6 +262,7 @@ async function deleteActiveKnowledgeBase() {
     await knowledgeJSON(knowledgeApi(`/knowledge-bases/${encodeURIComponent(deletedId)}`), { method: "DELETE" });
     knowledgeState.activeId = "";
     knowledgeState.activeBase = null;
+    persistActiveKnowledgeBase();
     knowledgeState.searchQuery = "";
     knowledgeState.searchResults = [];
     resetKnowledgeConversation();
@@ -354,6 +401,7 @@ function renderKnowledgeList() {
       const nextId = button.dataset.knowledgeItem || "";
       if (nextId !== knowledgeState.activeId) resetKnowledgeConversation();
       knowledgeState.activeId = nextId;
+      persistActiveKnowledgeBase();
       knowledgeState.searchResults = [];
       loadKnowledgeBaseDetail(knowledgeState.activeId);
     }),
@@ -571,14 +619,16 @@ function renderKnowledgeChat() {
   if (status) {
     status.textContent = knowledgeState.chatBusy
       ? "Agent 正在检索证据并生成回答..."
+      : knowledgeState.chatLoading
+        ? "正在恢复该知识库最近的会话..."
       : active
         ? "围绕当前知识库条目、矩阵字段与解析资产继续提问。"
         : "请先选择知识库。";
   }
-  if (input) input.disabled = knowledgeState.chatBusy || !active;
+  if (input) input.disabled = knowledgeState.chatBusy || knowledgeState.chatLoading || !active;
   if (sendButton) {
-    sendButton.disabled = knowledgeState.chatBusy || !active;
-    sendButton.textContent = knowledgeState.chatBusy ? "生成中..." : "发送任务";
+    sendButton.disabled = knowledgeState.chatBusy || knowledgeState.chatLoading || !active;
+    sendButton.textContent = knowledgeState.chatBusy ? "生成中..." : knowledgeState.chatLoading ? "恢复中..." : "发送任务";
   }
 }
 
@@ -649,7 +699,7 @@ async function submitKnowledgeSearch(event) {
 async function submitKnowledgeChat() {
   const input = knowledgeQuery(".knowledge-chat-input");
   const question = String(input?.value || "").trim();
-  if (!question || !knowledgeState.activeId || knowledgeState.chatBusy) return;
+  if (!question || !knowledgeState.activeId || knowledgeState.chatBusy || knowledgeState.chatLoading) return;
   knowledgeState.chatMessages.push({ role: "user", content: question, sources: [] });
   knowledgeState.chatBusy = true;
   if (input) input.value = "";
@@ -884,6 +934,7 @@ async function loadMatrixState() {
 function setupKnowledgePage() {
   if (!document.querySelector("[data-knowledge-page]")) return;
   knowledgeState.libraryId = document.body.dataset.libraryId || "";
+  knowledgeState.activeId = localStorage.getItem(knowledgeStorageKey("activeKnowledgeBase")) || "";
   const sidebarWidth = Number.parseInt(localStorage.getItem(knowledgeStorageKey("sidebarWidth")) || "", 10);
   const chatWidth = Number.parseInt(localStorage.getItem(knowledgeStorageKey("chatWidth")) || "", 10);
   if (sidebarWidth) document.documentElement.style.setProperty("--knowledge-sidebar-width", `${sidebarWidth}px`);

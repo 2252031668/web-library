@@ -27,6 +27,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "description": "hybrid=关键词+语义融合; keyword=全文BM25; semantic=向量; metadata=题录字段",
                     },
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "description": "返回条数，默认 8"},
+                    "filters": {
+                        "type": "object",
+                        "description": "可选结构化过滤器；始终与当前知识库作用域取交集",
+                        "properties": {
+                            "year_from": {"type": "integer"},
+                            "year_to": {"type": "integer"},
+                            "authors": {"type": "array", "items": {"type": "string"}},
+                            "venues": {"type": "array", "items": {"type": "string"}},
+                            "item_keys": {"type": "array", "items": {"type": "string"}},
+                            "chunk_types": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["abstract", "method", "results", "table", "figure_caption", "references", "paragraph", "metadata", "note"],
+                                },
+                            },
+                        },
+                    },
                 },
                 "required": ["query"],
             },
@@ -116,6 +134,7 @@ def search_evidence(
         mode=str(args.get("mode") or "hybrid"),
         top_k=_clamp(args.get("top_k", 8), 1, 20, default=8),
         include_context=False,
+        filters=args.get("filters") if isinstance(args.get("filters"), dict) else None,
     )
     slim = accumulator.register(raw.get("results") or [], include_text=False, excerpt_limit=300)
     return {
@@ -123,6 +142,9 @@ def search_evidence(
         "count": len(slim),
         "results": slim,
         "warnings": raw.get("warnings") or [],
+        "task_type": raw.get("task_type") or "factual",
+        "query_plan": raw.get("query_plan") or {},
+        "ranking_stages": raw.get("ranking_stages") or [],
     }
 
 
@@ -152,7 +174,29 @@ def read_context_scoped(
     source = context.get("source") if isinstance(context.get("source"), dict) else {}
     raw_results = [_raw_from_chunk(chunk, source) for chunk in chunks]
     slim = accumulator.register(raw_results, include_text=True, excerpt_limit=300, text_limit=1800)
-    return {"chunk_id": context.get("chunk_id") or chunk_id, "count": len(slim), "chunks": slim}
+    parent = context.get("parent") if isinstance(context.get("parent"), dict) else {}
+    parent_context: dict[str, Any] = {}
+    if parent:
+        if str(parent.get("item_key") or "") not in allowed:
+            return {"error": "chunk_out_of_scope", "message": "parent context is outside the current session scope"}
+        target = next((chunk for chunk in chunks if str(chunk.get("chunk_id") or "") == chunk_id), chunks[0])
+        parent_raw = _raw_from_chunk(target, source)
+        parent_raw["text"] = str(parent.get("content") or "")
+        parent_raw["section_path"] = str(parent.get("section_path") or "")
+        parent_slim = accumulator.register([parent_raw], include_text=True, excerpt_limit=300, text_limit=6000)
+        if parent_slim:
+            parent_context = {
+                **parent_slim[0],
+                "parent_chunk_id": str(parent.get("parent_chunk_id") or ""),
+                "section_path": str(parent.get("section_path") or ""),
+                "child_count": int(parent.get("child_count") or 0),
+            }
+    return {
+        "chunk_id": context.get("chunk_id") or chunk_id,
+        "count": len(slim),
+        "parent_context": parent_context,
+        "chunks": slim,
+    }
 
 
 def list_scope_documents(library: dict[str, Any], scope: ScopeContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -197,7 +241,7 @@ def list_scope_documents(library: dict[str, Any], scope: ScopeContext, args: dic
 
 
 def summarize_tool_trace(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    safe_args = {key: args[key] for key in ("query", "mode", "top_k", "chunk_id", "window_size", "limit") if key in args}
+    safe_args = {key: args[key] for key in ("query", "mode", "top_k", "filters", "chunk_id", "window_size", "limit") if key in args}
     trace: dict[str, Any] = {"tool": name, "args": safe_args, "ok": "error" not in result}
     result_count = result.get("count")
     if result_count is None:
@@ -230,6 +274,8 @@ def _raw_from_chunk(chunk: dict[str, Any], source: dict[str, Any]) -> dict[str, 
         "year": str(source.get("year") or ""),
         "venue": str(source.get("venue") or ""),
         "section_title": str(chunk.get("section_title") or ""),
+        "section_path": str(chunk.get("section_path") or ""),
+        "parent_chunk_id": str(chunk.get("parent_chunk_id") or ""),
         "estimated_page": chunk.get("estimated_page"),
         "text": str(chunk.get("content") or ""),
         "excerpt": str(chunk.get("excerpt") or chunk.get("content") or "")[:700],

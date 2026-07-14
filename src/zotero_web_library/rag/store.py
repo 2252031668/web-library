@@ -9,11 +9,16 @@ from typing import Any, Iterable
 from zotero_web_library.utils import now_iso
 
 
+RAG_SCHEMA_VERSION = 2
+CHUNK_CONTENT_VERSION = "structured-parent-v1"
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rag_config (
   library_id TEXT PRIMARY KEY,
-  schema_version INTEGER NOT NULL DEFAULT 1,
-  chunk_strategy TEXT NOT NULL DEFAULT 'markdown_heading',
+  schema_version INTEGER NOT NULL DEFAULT 2,
+  chunk_strategy TEXT NOT NULL DEFAULT 'structured_markdown_parent_child',
+  chunk_content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
   chunk_size INTEGER NOT NULL DEFAULT 900,
   chunk_overlap INTEGER NOT NULL DEFAULT 120,
   embedding_enabled INTEGER NOT NULL DEFAULT 0,
@@ -80,7 +85,9 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
   item_key TEXT NOT NULL,
   attachment_key TEXT NOT NULL DEFAULT '',
   chunk_index INTEGER NOT NULL,
+  parent_chunk_id TEXT NOT NULL DEFAULT '',
   chunk_type TEXT NOT NULL,
+  content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
   content TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   excerpt TEXT NOT NULL DEFAULT '',
@@ -109,6 +116,24 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_type ON rag_chunks(chunk_type);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_section ON rag_chunks(section_title);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_hash ON rag_chunks(content_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_chunks_unique_index ON rag_chunks(doc_id, chunk_index);
+CREATE TABLE IF NOT EXISTS rag_chunk_parents (
+  parent_chunk_id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  library_id TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  attachment_key TEXT NOT NULL DEFAULT '',
+  section_title TEXT NOT NULL DEFAULT '',
+  section_path TEXT NOT NULL DEFAULT '',
+  section_level INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  child_count INTEGER NOT NULL DEFAULT 0,
+  char_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_parents_doc ON rag_chunk_parents(doc_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_parents_item ON rag_chunk_parents(item_key);
 
 CREATE TABLE IF NOT EXISTS rag_embeddings (
   chunk_id TEXT PRIMARY KEY,
@@ -118,6 +143,7 @@ CREATE TABLE IF NOT EXISTS rag_embeddings (
   dim INTEGER NOT NULL,
   embedding BLOB NOT NULL,
   content_hash TEXT NOT NULL,
+  content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
   embedding_hash TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -265,17 +291,42 @@ def ensure_store(library: dict[str, Any]) -> None:
             (str(library["library_id"]), now_iso(), now_iso()),
         )
         _migrate_store(conn)
+        conn.execute(
+            """
+            UPDATE rag_config
+            SET schema_version = ?, chunk_strategy = ?, chunk_content_version = ?, updated_at = ?
+            WHERE library_id = ?
+            """,
+            (
+                RAG_SCHEMA_VERSION,
+                "structured_markdown_parent_child",
+                CHUNK_CONTENT_VERSION,
+                now_iso(),
+                str(library["library_id"]),
+            ),
+        )
         conn.commit()
 
 
 def _migrate_store(conn: sqlite3.Connection) -> None:
+    config_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_config)").fetchall()}
+    if "chunk_content_version" not in config_columns:
+        conn.execute("ALTER TABLE rag_config ADD COLUMN chunk_content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
     chunk_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chunks)").fetchall()}
+    if "parent_chunk_id" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN parent_chunk_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent ON rag_chunks(parent_chunk_id)")
     if "embedding_status" not in chunk_columns:
         conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_status TEXT NOT NULL DEFAULT 'not_configured'")
     if "embedding_model" not in chunk_columns:
         conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
     if "embedding_hash" not in chunk_columns:
         conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_hash TEXT NOT NULL DEFAULT ''")
+    if "content_version" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
+    embedding_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_embeddings)").fetchall()}
+    if "content_version" not in embedding_columns:
+        conn.execute("ALTER TABLE rag_embeddings ADD COLUMN content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
     message_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chat_messages)").fetchall()}
     if message_columns and "tool_trace_json" not in message_columns:
         conn.execute("ALTER TABLE rag_chat_messages ADD COLUMN tool_trace_json TEXT NOT NULL DEFAULT '[]'")
@@ -319,6 +370,7 @@ def reset_index(library: dict[str, Any], *, source_types: Iterable[str] | None =
                 conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
             conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_assets WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM rag_chunk_parents WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_documents WHERE doc_id = ?", (doc_id,))
         if not source_types:
@@ -383,6 +435,7 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
     config = conn.execute("SELECT embedding_enabled, embedding_provider, embedding_model FROM rag_config WHERE library_id = ?", (str(document["library_id"]),)).fetchone()
     embedding_enabled = bool(config and int(config["embedding_enabled"] or 0) and str(config["embedding_provider"] or "") and str(config["embedding_model"] or ""))
     embedding_model = f"{config['embedding_provider']}:{config['embedding_model']}" if embedding_enabled and config else ""
+    parent_ids = _insert_chunk_parents(conn, document, chunks)
     for index, chunk in enumerate(chunks):
         content = str(chunk.content or "").strip()
         if not content:
@@ -397,12 +450,14 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
             "item_key": document["item_key"],
             "attachment_key": document.get("attachment_key", ""),
             "chunk_index": index,
+            "parent_chunk_id": parent_ids.get(index, ""),
             "chunk_type": chunk.chunk_type,
+            "content_version": CHUNK_CONTENT_VERSION,
             "content": content,
             "content_hash": content_digest,
             "excerpt": excerpt,
             "section_title": chunk.section_title,
-            "section_path": chunk.section_title,
+            "section_path": str(getattr(chunk, "section_path", "") or chunk.section_title or ""),
             "section_level": int(chunk.section_level or 0),
             "estimated_page": chunk.estimated_page,
             "position_json": "{}",
@@ -421,15 +476,15 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
         conn.execute(
             """
             INSERT INTO rag_chunks (
-              chunk_id, doc_id, library_id, item_key, attachment_key, chunk_index, chunk_type,
-              content, content_hash, excerpt, section_title, section_path, section_level,
+              chunk_id, doc_id, library_id, item_key, attachment_key, chunk_index, parent_chunk_id, chunk_type,
+              content_version, content, content_hash, excerpt, section_title, section_path, section_level,
               estimated_page, position_json, token_count, char_count, word_count, has_assets,
               has_tables, has_equations, has_code, embedding_status, embedding_model,
               embedding_hash, created_at
             )
             VALUES (
-              :chunk_id, :doc_id, :library_id, :item_key, :attachment_key, :chunk_index, :chunk_type,
-              :content, :content_hash, :excerpt, :section_title, :section_path, :section_level,
+              :chunk_id, :doc_id, :library_id, :item_key, :attachment_key, :chunk_index, :parent_chunk_id, :chunk_type,
+              :content_version, :content, :content_hash, :excerpt, :section_title, :section_path, :section_level,
               :estimated_page, :position_json, :token_count, :char_count, :word_count, :has_assets,
               :has_tables, :has_equations, :has_code, :embedding_status, :embedding_model,
               :embedding_hash, :created_at
@@ -454,6 +509,67 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
                 content,
             ),
         )
+
+
+def _insert_chunk_parents(
+    conn: sqlite3.Connection,
+    document: dict[str, Any],
+    chunks: list[Any],
+) -> dict[int, str]:
+    groups: dict[str, list[tuple[int, Any]]] = {}
+    for index, chunk in enumerate(chunks):
+        content = str(getattr(chunk, "content", "") or "").strip()
+        if not content:
+            continue
+        section_path = str(getattr(chunk, "section_path", "") or getattr(chunk, "section_title", "") or "").strip()
+        group_key = section_path or f"__root__:{getattr(chunk, 'chunk_type', 'paragraph')}"
+        groups.setdefault(group_key, []).append((index, chunk))
+
+    parent_ids: dict[int, str] = {}
+    for group_key, members in groups.items():
+        first = members[0][1]
+        section_title = str(getattr(first, "section_title", "") or "")
+        section_path = str(getattr(first, "section_path", "") or section_title)
+        section_level = int(getattr(first, "section_level", 0) or 0)
+        content_parts: list[str] = []
+        seen: set[str] = set()
+        for _, chunk in members:
+            value = str(getattr(chunk, "content", "") or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            content_parts.append(value)
+        parent_content = "\n\n".join(content_parts)[:12000]
+        if not parent_content:
+            continue
+        parent_chunk_id = f"parent-{stable_id(str(document['doc_id']), group_key)}"
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO rag_chunk_parents (
+              parent_chunk_id, doc_id, library_id, item_key, attachment_key,
+              section_title, section_path, section_level, content, content_hash,
+              child_count, char_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parent_chunk_id,
+                str(document["doc_id"]),
+                str(document["library_id"]),
+                str(document["item_key"]),
+                str(document.get("attachment_key") or ""),
+                section_title,
+                section_path,
+                section_level,
+                parent_content,
+                text_hash(parent_content),
+                len(members),
+                len(parent_content),
+                now_iso(),
+            ),
+        )
+        for index, _ in members:
+            parent_ids[index] = parent_chunk_id
+    return parent_ids
 
 
 def insert_asset(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
@@ -621,6 +737,10 @@ def index_status(library: dict[str, Any]) -> dict[str, Any]:
             """
         ).fetchall()
         embedding_count = conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]
+        stale_chunk_count = conn.execute(
+            "SELECT COUNT(*) FROM rag_chunks WHERE content_version != ?",
+            (CHUNK_CONTENT_VERSION,),
+        ).fetchone()[0]
     payload = dict(config) if config else {"library_id": str(library["library_id"]), "index_status": "pending"}
     payload["rag_db_path"] = str(rag_db_path(library))
     payload["sources"] = [dict(row) for row in source_rows]
@@ -634,6 +754,9 @@ def index_status(library: dict[str, Any]) -> dict[str, Any]:
         "stored_embeddings": int(embedding_count or 0),
         "statuses": [dict(row) for row in embedding_rows],
     }
+    payload["content_version"] = CHUNK_CONTENT_VERSION
+    payload["stale_chunk_count"] = int(stale_chunk_count or 0)
+    payload["requires_reindex"] = bool(stale_chunk_count)
     return payload
 
 

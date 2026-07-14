@@ -125,6 +125,89 @@ def load_history(
     return [{"role": str(row["role"]), "content": str(row["content"] or "")} for row in rows]
 
 
+def load_conversation(
+    library: dict[str, Any],
+    *,
+    conversation_id: str = "",
+    knowledge_base_id: str = "",
+) -> dict[str, Any]:
+    """Load one persisted chat for restoring the knowledge-base workbench.
+
+    When no conversation id is supplied, the most recently updated
+    conversation in the requested knowledge base is returned.
+    """
+    ensure_store(library)
+    library_id = str(library["library_id"])
+    clean_conversation_id = str(conversation_id or "").strip()
+    clean_knowledge_base_id = str(knowledge_base_id or "").strip()
+    if not clean_conversation_id and not clean_knowledge_base_id:
+        raise ValueError("conversation_id 和 knowledge_base_id 至少需要一个。")
+
+    with connect(library) as conn:
+        if clean_conversation_id:
+            session_row = conn.execute(
+                """
+                SELECT *
+                FROM rag_chat_sessions
+                WHERE conversation_id = ? AND library_id = ?
+                """,
+                (clean_conversation_id, library_id),
+            ).fetchone()
+        else:
+            session_row = conn.execute(
+                """
+                SELECT *
+                FROM rag_chat_sessions
+                WHERE library_id = ? AND knowledge_base_id = ?
+                ORDER BY updated_at DESC, created_at DESC, conversation_id DESC
+                LIMIT 1
+                """,
+                (library_id, clean_knowledge_base_id),
+            ).fetchone()
+
+        if not session_row:
+            return {
+                "conversation_id": "",
+                "knowledge_base_id": clean_knowledge_base_id,
+                "item_keys": [],
+                "messages": [],
+            }
+
+        session = _session_from_row(dict(session_row))
+        message_rows = conn.execute(
+            """
+            SELECT turn_index, role, content, sources_json, tool_trace_json, created_at
+            FROM rag_chat_messages
+            WHERE conversation_id = ? AND role IN ('user', 'assistant')
+            ORDER BY turn_index ASC,
+              CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END,
+              created_at ASC
+            """,
+            (session.conversation_id,),
+        ).fetchall()
+
+    messages = [
+        {
+            "turn_index": int(row["turn_index"] or 0),
+            "role": str(row["role"] or ""),
+            "content": str(row["content"] or ""),
+            "sources": _json_list(row["sources_json"]),
+            "tool_trace": _json_list(row["tool_trace_json"]),
+            "created_at": str(row["created_at"] or ""),
+        }
+        for row in message_rows
+    ]
+    return {
+        "conversation_id": session.conversation_id,
+        "knowledge_base_id": session.knowledge_base_id,
+        "item_keys": session.item_keys,
+        "messages": messages,
+        "title": str(session_row["title"] or ""),
+        "created_at": str(session_row["created_at"] or ""),
+        "updated_at": str(session_row["updated_at"] or ""),
+    }
+
+
 def save_turn(
     library: dict[str, Any],
     session: ChatSession,
@@ -194,3 +277,11 @@ def _session_from_row(row: dict[str, Any]) -> ChatSession:
         knowledge_base_id=str(row.get("knowledge_base_id") or ""),
         item_keys=normalize_item_keys(item_keys),
     )
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return payload if isinstance(payload, list) else []

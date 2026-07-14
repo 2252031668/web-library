@@ -8,7 +8,7 @@ from typing import Any
 from zotero_web_library.rag import index_library
 from zotero_web_library.rag.agent.evidence import EvidenceAccumulator
 from zotero_web_library.rag.agent.loop import run_agentic_chat
-from zotero_web_library.rag.agent.memory import load_history
+from zotero_web_library.rag.agent.memory import load_conversation, load_history
 from zotero_web_library.rag.agent.tools import ScopeContext, execute_tool
 from zotero_web_library.rag.store import (
     connect,
@@ -134,6 +134,9 @@ def test_agent_tools_inject_scope_and_guard_chunk_reads(zotero_fixture: Path, mo
     )
 
     assert read_trace["ok"] is True
+    assert read_result["parent_context"]
+    assert read_result["parent_context"]["section_path"] == "Method"
+    assert "Action chunking" in read_result["parent_context"]["text"]
     assert read_result["chunks"]
     assert "text" in read_result["chunks"][0]
     assert any(source["chunk_id"] == chunk_id for source in accumulator.all_sources())
@@ -172,10 +175,18 @@ def test_run_agentic_chat_normal_flow_persists_pruned_history(zotero_fixture: Pa
     assert result["tool_trace"][0]["tool"] == "search_evidence"
     assert fake_client.completions.calls[0]["tool_choice"] == "auto"
     assert fake_client.completions.calls[0]["messages"][0]["role"] == "system"
+    assert "Injected Agentic RAG Skill Bundle" in fake_client.completions.calls[0]["messages"][0]["content"]
+    assert "parent_context" in fake_client.completions.calls[0]["messages"][0]["content"]
 
     history = load_history(library, result["conversation_id"])
     assert [item["role"] for item in history] == ["user", "assistant"]
     assert "Action chunking" in history[1]["content"]
+
+    restored = load_conversation(library, knowledge_base_id=scoped["knowledge_base_id"])
+    assert restored["conversation_id"] == result["conversation_id"]
+    assert [item["role"] for item in restored["messages"]] == ["user", "assistant"]
+    assert restored["messages"][1]["sources"]
+    assert restored["messages"][1]["tool_trace"][0]["tool"] == "search_evidence"
 
 
 def test_run_agentic_chat_forces_final_iteration_and_ignores_tool_calls(

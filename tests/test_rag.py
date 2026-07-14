@@ -69,6 +69,18 @@ def test_rag_indexes_metadata_notes_and_mineru_results(zotero_fixture: Path, mon
     assert any("Action chunking" in chunk["content"] for chunk in context["chunks"])
 
 
+def test_keyword_search_treats_hyphenated_terms_as_literals(zotero_fixture: Path, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    index_library(library)
+
+    result = keyword_search(library, "Action-chunking")
+
+    assert result["results"]
+    assert result["results"][0]["source"]["item_key"] == "ITEM0001"
+
+
 def test_rag_api_minimal_flow(zotero_fixture: Path, monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
@@ -181,7 +193,7 @@ def test_retrieve_respects_knowledge_base_scope(zotero_fixture: Path, monkeypatc
     assert "no_evidence_found" in pack["warnings"]
 
 
-def test_retrieve_falls_back_to_scoped_context_for_natural_language_question(
+def test_retrieve_rewrites_natural_language_question_before_scope_fallback(
     zotero_fixture: Path,
     monkeypatch,
     tmp_path: Path,
@@ -195,11 +207,12 @@ def test_retrieve_falls_back_to_scoped_context_for_natural_language_question(
     pack = retrieve(library, "这篇文章的方法是什么？", knowledge_base_id=scoped["knowledge_base_id"], top_k=5)
 
     assert pack["results"]
-    assert len(pack["results"]) <= 4
+    assert len(pack["results"]) <= 5
     assert {item["item_key"] for item in pack["results"]} == {"ITEM0001"}
-    assert "keyword_no_match_used_scope_context" in pack["warnings"]
-    assert any(call["tool"] == "scope_context_read" for call in pack["tool_calls"])
-    assert all(item["retrieval_type"] == "scope_context" for item in pack["results"])
+    assert pack["task_type"] == "factual"
+    assert any(query["reason"] == "bilingual_expansion" for query in pack["query_plan"]["queries"])
+    assert any(call["tool"] == "keyword_search" and call["result_count"] for call in pack["tool_calls"])
+    assert "keyword_no_match_used_scope_context" not in pack["warnings"]
     assert any("Action chunking" in item["text"] for item in pack["results"])
 
 
@@ -221,6 +234,8 @@ def test_retrieve_semantic_mode_is_explicitly_not_configured(
             "tool": "semantic_search",
             "query": "robot planning",
             "result_count": 0,
+            "query_id": "q0",
+            "parent_query_id": "",
             "status": "not_configured",
         }
     ]
@@ -371,6 +386,29 @@ def test_retrieve_hybrid_uses_semantic_results_when_configured(
     assert pack["results"]
     assert any(call["tool"] == "semantic_search" and call["status"] == "ok" for call in pack["tool_calls"])
     assert any("semantic_score" in result.get("scores", {}) for result in pack["results"])
+
+
+def test_retrieve_hybrid_degrades_when_semantic_provider_fails(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    index_library(library)
+
+    def failing_semantic_search(*args, **kwargs):
+        raise RuntimeError("embedding endpoint unavailable")
+
+    monkeypatch.setattr("zotero_web_library.rag.retriever.semantic_search", failing_semantic_search)
+    pack = retrieve(library, "Action chunking", mode="hybrid", top_k=5)
+
+    assert pack["results"]
+    assert "semantic_search_failed" in pack["warnings"]
+    semantic_call = next(call for call in pack["tool_calls"] if call["tool"] == "semantic_search")
+    assert semantic_call["status"] == "failed"
+    assert semantic_call["error"] == "embedding endpoint unavailable"
 
 
 def test_semantic_search_api(
