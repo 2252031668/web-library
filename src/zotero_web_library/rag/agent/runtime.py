@@ -374,6 +374,8 @@ def reconcile_interrupted_runs(
     active_run_ids: set[str] | None = None,
 ) -> list[str]:
     ensure_store(library)
+    if active_run_ids is None:
+        return []
     timestamp = now_iso()
     interrupted: list[str] = []
     with connect(library) as conn:
@@ -388,9 +390,9 @@ def reconcile_interrupted_runs(
         for row in rows:
             run_id = str(row["run_id"] or "")
             worker_id = str(row["worker_id"] or "")
-            belongs_to_dead_worker = worker_id != PROCESS_WORKER_ID
-            missing_active_job = active_run_ids is not None and run_id not in active_run_ids
-            if not belongs_to_dead_worker and not missing_active_job:
+            if worker_id != PROCESS_WORKER_ID:
+                continue
+            if run_id in active_run_ids:
                 continue
             checkpoint = _json_object(row["checkpoint_json"])
             checkpoint.update(

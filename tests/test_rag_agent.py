@@ -12,7 +12,7 @@ from zotero_web_library.rag.agent.evidence import EvidenceAccumulator
 from zotero_web_library.rag.agent.controller import AgentController
 from zotero_web_library.rag.agent.jobs import cancel_agent_chat_job, restart_agent_chat_job, start_agentic_chat_job
 from zotero_web_library.rag.agent.loop import prepare_agentic_chat_run, run_agentic_chat
-from zotero_web_library.rag.agent.memory import load_conversation, load_history
+from zotero_web_library.rag.agent.memory import complete_turn, load_conversation, load_history
 from zotero_web_library.rag.agent.models import EvidenceState, TaskPlan
 from zotero_web_library.rag.agent.runtime import load_agent_run, reconcile_interrupted_runs
 from zotero_web_library.rag.agent.tools import ScopeContext, execute_tool
@@ -730,7 +730,7 @@ def test_async_agent_job_persists_progress_and_can_be_cancelled(
     assert restored["messages"][1]["agent_trace"]
 
 
-def test_run_checkpoint_redacts_sensitive_values_and_reconciles_dead_worker(
+def test_run_checkpoint_redacts_sensitive_values_and_reconciles_missing_local_job(
     zotero_fixture: Path,
     monkeypatch,
     tmp_path: Path,
@@ -759,13 +759,7 @@ def test_run_checkpoint_redacts_sensitive_values_and_reconciles_dead_worker(
     assert diagnostic["payload"]["nested"]["authorization"] == "[redacted]"
     assert diagnostic["payload"]["nested"]["safe"] == "kept"
 
-    with connect(library) as conn:
-        conn.execute(
-            "UPDATE rag_agent_runs SET worker_id = 'dead-worker' WHERE run_id = ?",
-            (prepared.recorder.run_id,),
-        )
-        conn.commit()
-    assert reconcile_interrupted_runs(library) == [prepared.recorder.run_id]
+    assert reconcile_interrupted_runs(library, active_run_ids=set()) == [prepared.recorder.run_id]
     run = load_agent_run(library, prepared.recorder.run_id)
     assert run["status"] == "interrupted"
     assert run["stop_reason"] == "interrupted"
@@ -790,13 +784,7 @@ def test_interrupted_run_can_explicitly_restart_from_original_user_turn(
         question="What is action chunking used for?",
         knowledge_base_id=scoped["knowledge_base_id"],
     )
-    with connect(library) as conn:
-        conn.execute(
-            "UPDATE rag_agent_runs SET worker_id = 'dead-worker' WHERE run_id = ?",
-            (prepared.recorder.run_id,),
-        )
-        conn.commit()
-    reconcile_interrupted_runs(library)
+    reconcile_interrupted_runs(library, active_run_ids=set())
 
     restarted = restart_agent_chat_job(
         library=library,
@@ -814,6 +802,72 @@ def test_interrupted_run_can_explicitly_restart_from_original_user_turn(
     assert run["status"] == "abstained"
     restarted_event = next(event for event in run["events"] if event["event_type"] == "run.restarted")
     assert restarted_event["payload"]["previous_run_id"] == prepared.recorder.run_id
+
+
+def test_reconcile_does_not_interrupt_live_run_owned_by_another_worker(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    library = indexed_library(zotero_fixture, monkeypatch, tmp_path)
+    scoped = create_knowledge_base(library, name="Core", item_keys=["ITEM0001"])
+    prepared = prepare_agentic_chat_run(
+        library=library,
+        model_config={"model": "gpt-test", "api_key": "sk-test"},
+        question="What is action chunking used for?",
+        knowledge_base_id=scoped["knowledge_base_id"],
+    )
+
+    monkeypatch.setattr(
+        "zotero_web_library.rag.agent.runtime.PROCESS_WORKER_ID",
+        "worker-other-process",
+    )
+
+    assert reconcile_interrupted_runs(library) == []
+    run = load_agent_run(library, prepared.recorder.run_id)
+    assert run["status"] == "running"
+    assert not any(event["event_type"] == "run.interrupted" for event in run["events"])
+
+
+def test_complete_turn_overwrites_interruption_placeholder(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    library = indexed_library(zotero_fixture, monkeypatch, tmp_path)
+    scoped = create_knowledge_base(library, name="Core", item_keys=["ITEM0001"])
+    prepared = prepare_agentic_chat_run(
+        library=library,
+        model_config={"model": "gpt-test", "api_key": "sk-test"},
+        question="What is action chunking used for?",
+        knowledge_base_id=scoped["knowledge_base_id"],
+    )
+    assert reconcile_interrupted_runs(library, active_run_ids=set()) == [prepared.recorder.run_id]
+
+    complete_turn(
+        library,
+        prepared.session,
+        turn_index=prepared.turn_index,
+        answer="Final answer from surviving worker.",
+        sources=[{"citation": "[ITEM0001:chunk-1]"}],
+        tool_trace=[{"tool": "search_evidence"}],
+        run_id=prepared.recorder.run_id,
+    )
+
+    with connect(library) as conn:
+        row = conn.execute(
+            """
+            SELECT content, sources_json, tool_trace_json
+            FROM rag_chat_messages
+            WHERE conversation_id = ? AND turn_index = ? AND role = 'assistant'
+            """,
+            (prepared.session.conversation_id, prepared.turn_index),
+        ).fetchone()
+
+    assert row is not None
+    assert row["content"] == "Final answer from surviving worker."
+    assert json.loads(row["sources_json"]) == [{"citation": "[ITEM0001:chunk-1]"}]
+    assert json.loads(row["tool_trace_json"]) == [{"tool": "search_evidence"}]
 
 
 def test_session_scope_is_snapshotted_and_deleted_with_knowledge_base(

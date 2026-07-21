@@ -143,9 +143,6 @@ def load_conversation(
     conversation in the requested knowledge base is returned.
     """
     ensure_store(library)
-    from .runtime import reconcile_interrupted_runs
-
-    reconcile_interrupted_runs(library)
     library_id = str(library["library_id"])
     clean_conversation_id = str(conversation_id or "").strip()
     clean_knowledge_base_id = str(knowledge_base_id or "").strip()
@@ -349,26 +346,41 @@ def complete_turn(
             (session.conversation_id, int(turn_index)),
         ).fetchone()
         if existing:
-            return
-        conn.execute(
-            """
-            INSERT INTO rag_chat_messages (
-              message_id, conversation_id, run_id, turn_index, role, content,
-              sources_json, tool_trace_json, created_at
+            conn.execute(
+                """
+                UPDATE rag_chat_messages
+                SET run_id = ?, content = ?, sources_json = ?, tool_trace_json = ?, created_at = ?
+                WHERE message_id = ?
+                """,
+                (
+                    str(run_id or ""),
+                    str(answer or ""),
+                    json_dumps(sources),
+                    json_dumps(tool_trace),
+                    timestamp,
+                    str(existing["message_id"] or ""),
+                ),
             )
-            VALUES (?, ?, ?, ?, 'assistant', ?, ?, ?, ?)
-            """,
-            (
-                f"msg-{uuid.uuid4().hex}",
-                session.conversation_id,
-                str(run_id or ""),
-                int(turn_index),
-                str(answer or ""),
-                json_dumps(sources),
-                json_dumps(tool_trace),
-                timestamp,
-            ),
-        )
+        else:
+            conn.execute(
+                """
+                INSERT INTO rag_chat_messages (
+                  message_id, conversation_id, run_id, turn_index, role, content,
+                  sources_json, tool_trace_json, created_at
+                )
+                VALUES (?, ?, ?, ?, 'assistant', ?, ?, ?, ?)
+                """,
+                (
+                    f"msg-{uuid.uuid4().hex}",
+                    session.conversation_id,
+                    str(run_id or ""),
+                    int(turn_index),
+                    str(answer or ""),
+                    json_dumps(sources),
+                    json_dumps(tool_trace),
+                    timestamp,
+                ),
+            )
         conn.execute(
             """
             UPDATE rag_chat_sessions

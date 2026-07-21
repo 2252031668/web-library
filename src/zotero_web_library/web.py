@@ -14551,7 +14551,6 @@ def create_app() -> Flask:
     def api_rag_chat_run(library_id: str, run_id: str):
         try:
             library = library_or_404(library_id)
-            reconcile_interrupted_runs(library)
             run = load_agent_run(library, run_id)
             if not run or str(run.get("library_id") or "") != library_id:
                 return jsonify({"ok": False, "error": "Agent 运行记录不存在。"}), 404
