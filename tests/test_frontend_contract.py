@@ -14,12 +14,12 @@ def test_source_index_contains_service_path_and_upload_contracts() -> None:
     app_js = (root / "src" / "zotero_web_library" / "static" / "app.js").read_text(encoding="utf-8")
     app_css = (root / "src" / "zotero_web_library" / "static" / "app.css").read_text(encoding="utf-8")
 
-    assert "<h1>网页文库</h1>" in index_html
-    assert "无缝衔接您的 Zotero 资产" in index_html
+    assert "光明科研工作站" in index_html
+    assert "AI文献综述分析平台" in index_html
     assert "本地只读模式" in index_html
     assert "副本编辑模式" in index_html
-    assert "选择本地路径" in index_html
-    assert "复制本地路径" in index_html
+    assert "选择路径" in index_html
+    assert "复制并编辑" in index_html
     assert "上传文件夹" in index_html
     assert "进入文库" in index_html
     assert "当前选择目录" in index_html
