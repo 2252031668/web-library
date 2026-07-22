@@ -3,77 +3,326 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>网页文库</title>
+  <title>光明科研工作站 - 文献综述分析平台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;600;700;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body class="landing-page">
-  <main class="source-shell">
-    <section class="source-hero">
-      <div>
-        <p class="eyebrow">Web Library</p>
-        <h1>网页文库</h1>
-        <p>无缝衔接您的 Zotero 资产，可以本地只读，也可以创建本地副本，还可以直接通过浏览器上传。</p>
+  <div class="landing-bg"></div>
+  <div class="landing-particles">
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+  </div>
+
+  <main class="landing-main">
+    <header class="landing-header">
+      <div class="landing-logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#9B59FF"/>
+                <stop offset="50%" style="stop-color:#FF6B9D"/>
+                <stop offset="100%" style="stop-color:#9B59FF"/>
+              </linearGradient>
+            </defs>
+            <circle cx="24" cy="24" r="22" stroke="url(#logoGrad)" stroke-width="2" fill="none"/>
+            <circle cx="24" cy="24" r="16" stroke="url(#logoGrad)" stroke-width="1" stroke-dasharray="4 4" fill="none"/>
+            <path d="M24 8v16M24 32v8M8 24h16M32 24h8" stroke="url(#logoGrad)" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="24" cy="24" r="4" fill="url(#logoGrad)"/>
+          </svg>
+        </div>
+        <div class="logo-text">
+          <span class="logo-title">光明科研工作站</span>
+          <span class="logo-subtitle">AI 文献综述分析平台</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="landing-hero">
+      <div class="hero-content">
+        <div class="hero-badge">
+          <span class="badge-dot"></span>
+          <span>学术研究 · A-RAG智能分析</span>
+        </div>
+        <h1 class="hero-title">光明科研工作站<br>AI文献综述分析平台</h1>
+        <p class="hero-subtitle">多元数据检索 · 文献矩阵构建 · 流程化综述写作</p>
+        <p class="hero-desc">基于 A-RAG 智能检索问答系统，深度理解文献内容，构建结构化文献矩阵，支持多阶段流程化综述写作，为科研工作者提供全方位的学术研究支持</p>
+        <div class="hero-features">
+          <span>多元数据AI检索</span>
+          <span>Zotero文献库管理</span>
+          <span>专业化文献研读</span>
+          <span>文献矩阵构建</span>
+        </div>
+        <button class="hero-cta" id="scroll-to-config">
+          <span>连接文献库开始使用</span>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+        </button>
+      </div>
+      <div class="hero-visual">
+        <div class="orbit-ring"></div>
+        <div class="orbit-ring-inner"></div>
+        <div class="orbit-node n1">检</div>
+        <div class="orbit-node n2">研</div>
+        <div class="orbit-node n3">矩</div>
+        <div class="orbit-node n4">写</div>
+        <div class="orbit-center">
+          <svg viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="30" cy="30" r="24" fill="url(#logoGrad)"/>
+            <text x="30" y="35" text-anchor="middle" fill="white" font-size="14" font-weight="700">AI</text>
+          </svg>
+        </div>
       </div>
     </section>
 
-    <section class="source-grid">
-      <form class="source-card" data-source-form data-mode="read-only">
-        <h2>本地只读模式</h2>
-        <p>读取服务运行环境可访问的目录，禁用任何会修改源库的操作。</p>
-        <div class="path-picker-row">
-          <input id="read-only-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
-          <button type="button" class="secondary-btn" data-open-server-path-picker data-path-picker-target="#read-only-path">选择本地路径</button>
+    <section class="landing-section values-section">
+      <h2 class="section-title">核心功能</h2>
+      <p class="section-subtitle">覆盖学术研究全流程的智能化工具链</p>
+      <div class="values-grid">
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.35-4.35"/>
+              <path d="M16.5 16.5l-2.5-2.5"/>
+            </svg>
+          </div>
+          <h3>多元数据AI检索</h3>
+          <p>支持多数据源智能检索，精准定位相关文献与证据，支持跨库搜索和多维度筛选</p>
         </div>
-        <input name="name" placeholder="可选名称，例如 我的文库">
-        <button type="submit">连接只读文库</button>
-      </form>
-      <form class="source-card" data-source-form data-mode="local-copy">
-        <h2>副本编辑模式</h2>
-        <p>从服务路径复制，或上传浏览器所在电脑的文件夹，然后只编辑副本。</p>
-        <div class="path-picker-row copy-path-row">
-          <input id="local-copy-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
-          <button type="button" class="secondary-btn" data-open-server-path-picker data-path-picker-target="#local-copy-path">选择本地路径</button>
-          <button type="button" class="secondary-btn" data-upload-folder>上传文件夹</button>
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <path d="M3 9h18"/>
+              <path d="M9 21V9"/>
+            </svg>
+          </div>
+          <h3>Zotero文献库管理</h3>
+          <p>完全兼容 Zotero 数据目录，支持本地只读与副本编辑两种模式，安全管理您的文献资源</p>
         </div>
-        <input name="name" placeholder="可选名称，例如 副本：我的文库">
-        <button type="submit">复制本地路径</button>
-        <input type="file" data-upload-folder-input webkitdirectory multiple hidden>
-        <div class="upload-progress" data-upload-progress hidden>
-          <div class="upload-progress-bar"><span data-upload-progress-bar></span></div>
-          <p data-upload-progress-status>等待上传</p>
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <path d="M9 13l2 2 4-4"/>
+            </svg>
+          </div>
+          <h3>专业化文献研读</h3>
+          <p>支持单篇文献深度研读对话，可针对文献内容提问、分析实验设置、理解核心贡献</p>
         </div>
-        <p class="upload-unsupported" data-folder-upload-unsupported hidden>当前浏览器不支持文件夹上传，请改用服务路径方式。</p>
-      </form>
-    </section>
-
-    <section class="library-list">
-      <h2>已配置文库</h2>
-      {% if libraries %}
-      {% for library in libraries %}
-      <div class="library-list-item">
-        <div class="library-list-main">
-          <strong>{{ library.name }}</strong>
-          <span>{{ "本地只读" if library.mode == "read_only_connection" else "副本编辑" }} · 来源：{{ library.source_path }}</span>
-          {% if library.mode == "local_copy" %}
-          <span>副本：{{ library.data_path }}</span>
-          {% endif %}
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+          </div>
+          <h3>文献矩阵构建</h3>
+          <p>结构化知识库文献矩阵构建，支持自定义字段，批量生成文献分析数据，系统化管理研究资料</p>
         </div>
-        <div class="library-list-actions">
-          <a class="library-enter-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">进入文库</a>
-          <button
-            type="button"
-            class="danger-btn"
-            data-delete-source="{{ library.library_id }}"
-            data-confirm="{{ '确认删除这个副本？原始源目录不会被修改。' if library.mode == 'local_copy' else '确认断开这个只读连接？原始源目录不会被修改。' }}"
-          >{{ "删除副本" if library.mode == "local_copy" else "断开" }}</button>
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+          </div>
+          <h3>A-RAG智能问答</h3>
+          <p>基于增强检索生成的智能问答系统，提供精准的文献证据引用，支持多轮对话与深度分析</p>
+        </div>
+        <div class="value-card">
+          <div class="value-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+            </svg>
+          </div>
+          <h3>流程化综述写作</h3>
+          <p>多阶段流程化综述写作辅助，涵盖主题拟定、大纲生成、文献映射、正文撰写全流程</p>
         </div>
       </div>
-      {% endfor %}
-      {% else %}
-      <div class="empty-state">还没有文库，先选择服务路径或上传本机文件夹。</div>
-      {% endif %}
     </section>
+
+    <section class="landing-section scenarios-section">
+      <h2 class="section-title">研究流程</h2>
+      <p class="section-subtitle">从文献检索到综述完成的完整工作流</p>
+      <div class="scenarios-grid">
+        <div class="scenario-card">
+          <div class="scenario-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.35-4.35"/>
+              <path d="M16.5 16.5l-2.5-2.5"/>
+            </svg>
+          </div>
+          <h3>智能检索与筛选</h3>
+          <p>基于多元数据AI检索系统，快速定位高质量文献，支持多维度筛选与证据预览</p>
+        </div>
+        <div class="scenario-card">
+          <div class="scenario-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <path d="M9 13l2 2 4-4"/>
+            </svg>
+          </div>
+          <h3>深度研读与标注</h3>
+          <p>专业文献研读工具，支持PDF阅读、标注与对话分析，深入理解每篇文献的核心内容</p>
+        </div>
+        <div class="scenario-card">
+          <div class="scenario-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </div>
+          <h3>流程化综述写作</h3>
+          <p>多阶段写作辅助：主题拟定→大纲生成→文献映射→正文撰写，系统化完成综述论文</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="landing-section config-section" id="config-section">
+      <h2 class="section-title">文库配置</h2>
+      <p class="section-subtitle">连接您的文献库，开始智能分析之旅</p>
+      
+      <div class="config-grid">
+        <form class="config-card" data-source-form data-mode="read-only">
+          <div class="config-card-header">
+            <div class="config-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <div>
+              <h3>本地只读模式</h3>
+              <p>读取服务运行环境可访问的目录，禁用任何会修改源库的操作</p>
+            </div>
+          </div>
+          <div class="config-form">
+            <div class="form-row">
+              <input id="read-only-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
+              <button type="button" class="form-btn secondary" data-open-server-path-picker data-path-picker-target="#read-only-path">选择路径</button>
+            </div>
+            <input name="name" placeholder="可选名称，例如 我的文库">
+            <button type="submit" class="form-btn primary">连接只读文库</button>
+          </div>
+        </form>
+
+        <form class="config-card" data-source-form data-mode="local-copy">
+          <div class="config-card-header">
+            <div class="config-icon-wrap accent">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+                <path d="M9 13l2 2 4-4"/>
+              </svg>
+            </div>
+            <div>
+              <h3>副本编辑模式</h3>
+              <p>从服务路径复制，或上传浏览器所在电脑的文件夹，然后只编辑副本</p>
+            </div>
+          </div>
+          <div class="config-form">
+            <div class="form-row">
+              <input id="local-copy-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
+              <button type="button" class="form-btn secondary" data-open-server-path-picker data-path-picker-target="#local-copy-path">选择路径</button>
+              <button type="button" class="form-btn secondary" data-upload-folder>上传文件夹</button>
+            </div>
+            <input name="name" placeholder="可选名称，例如 副本：我的文库">
+            <button type="submit" class="form-btn primary">复制并编辑</button>
+            <input type="file" data-upload-folder-input webkitdirectory multiple hidden>
+            <div class="upload-progress" data-upload-progress hidden>
+              <div class="upload-progress-bar"><span data-upload-progress-bar></span></div>
+              <p data-upload-progress-status>等待上传</p>
+            </div>
+            <p class="upload-unsupported" data-folder-upload-unsupported hidden>当前浏览器不支持文件夹上传，请改用服务路径方式。</p>
+          </div>
+        </form>
+      </div>
+
+      <div class="libraries-section">
+        <h3 class="libraries-title">已配置文献库</h3>
+        {% if libraries %}
+        {% for library in libraries %}
+        <div class="library-item">
+          <div class="library-info">
+            <strong>{{ library.name }}</strong>
+            <span class="library-mode">{{ "本地只读" if library.mode == "read_only_connection" else "副本编辑" }}</span>
+            <span class="library-path">来源：{{ library.source_path }}</span>
+            {% if library.mode == "local_copy" %}
+            <span class="library-path">副本：{{ library.data_path }}</span>
+            {% endif %}
+          </div>
+          <div class="library-actions">
+            <a class="library-btn enter" href="{{ url_for('library_page', library_id=library.library_id) }}">进入文库</a>
+            <button
+              type="button"
+              class="library-btn delete"
+              data-delete-source="{{ library.library_id }}"
+              data-confirm="{{ '确认删除这个副本？原始源目录不会被修改。' if library.mode == 'local_copy' else '确认断开这个只读连接？原始源目录不会被修改。' }}"
+            >{{ "删除副本" if library.mode == "local_copy" else "断开" }}</button>
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="empty-libraries">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+          </div>
+          <p>还没有文库，先选择服务路径或上传本机文件夹</p>
+          <span class="empty-hint">支持从 Zotero 数据目录直接导入</span>
+        </div>
+        {% endif %}
+      </div>
+    </section>
+
+    <footer class="landing-footer">
+      <div class="footer-content">
+        <div class="footer-logo">
+          <div class="logo-icon small">
+            <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="footerLogoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style="stop-color:#9B59FF"/>
+                  <stop offset="50%" style="stop-color:#FF6B9D"/>
+                  <stop offset="100%" style="stop-color:#9B59FF"/>
+                </linearGradient>
+              </defs>
+              <circle cx="24" cy="24" r="22" stroke="url(#footerLogoGrad)" stroke-width="2" fill="none"/>
+              <circle cx="24" cy="24" r="16" stroke="url(#footerLogoGrad)" stroke-width="1" stroke-dasharray="4 4" fill="none"/>
+              <path d="M24 8v16M24 32v8M8 24h16M32 24h8" stroke="url(#footerLogoGrad)" stroke-width="2" stroke-linecap="round"/>
+              <circle cx="24" cy="24" r="4" fill="url(#footerLogoGrad)"/>
+            </svg>
+          </div>
+          <span>光明科研工作站</span>
+        </div>
+        <p>基于 A-RAG 的智能文献综述分析平台 · 助力学术研究与知识创新</p>
+        <div class="footer-links">
+          <a href="#">使用帮助</a>
+          <a href="#">功能介绍</a>
+          <a href="#">联系我们</a>
+        </div>
+      </div>
+    </footer>
   </main>
+
   <div class="path-modal" data-server-path-modal hidden>
     <div class="path-modal-card">
       <button type="button" class="path-close-btn" data-close-server-path-picker aria-label="关闭">×</button>
@@ -96,6 +345,17 @@
       <p class="path-modal-message" data-server-path-message></p>
     </div>
   </div>
+
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const scrollBtn = document.getElementById('scroll-to-config');
+      if (scrollBtn) {
+        scrollBtn.addEventListener('click', function() {
+          document.getElementById('config-section').scrollIntoView({ behavior: 'smooth' });
+        });
+      }
+    });
+  </script>
 </body>
 </html>
